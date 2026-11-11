@@ -1,9 +1,9 @@
 name: CI
 
+# Runs on every branch, so work is tested before it is merged into main
+# (main deploys automatically).
 on:
   push:
-    branches: [main]
-  pull_request:
 
 jobs:
   backend:
