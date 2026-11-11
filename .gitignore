@@ -19,3 +19,6 @@ dist/
 
 # claude code local settings
 .claude/
+
+# private study notes (separate private repo)
+notes/
