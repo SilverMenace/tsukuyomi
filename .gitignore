@@ -22,3 +22,6 @@ dist/
 
 # private study notes (separate private repo)
 notes/
+
+# dashboard build copied in by the Dockerfile
+backend/src/main/resources/static/

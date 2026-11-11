@@ -1,3 +1,11 @@
+# ---- dashboard stage: build the React app into static files ----
+FROM node:24-alpine AS dashboard
+WORKDIR /src/dashboard
+COPY dashboard/package.json dashboard/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY dashboard/ ./
+RUN npm run build
+
 # ---- build stage: compile and package the backend ----
 FROM eclipse-temurin:21-jdk AS build
 WORKDIR /src/backend
@@ -7,6 +15,9 @@ COPY backend/mvnw backend/pom.xml ./
 COPY backend/.mvn .mvn
 RUN ./mvnw -B -q dependency:go-offline
 COPY backend/src src
+# Spring Boot serves anything in resources/static, so the dashboard ships
+# inside the same jar as the API.
+COPY --from=dashboard /src/dashboard/dist src/main/resources/static
 RUN ./mvnw -B -q -DskipTests package
 
 # ---- run stage: small image with only a Java runtime and the jar ----

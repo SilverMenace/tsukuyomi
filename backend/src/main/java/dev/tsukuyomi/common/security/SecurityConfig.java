@@ -41,6 +41,8 @@ public class SecurityConfig {
 			.exceptionHandling(e -> e.authenticationEntryPoint(unauthorizedAsJson(json)))
 			.authorizeHttpRequests(auth -> auth
 				.requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
+				// The dashboard's static files (built by Vite into the jar).
+				.requestMatchers(HttpMethod.GET, "/", "/index.html", "/favicon.svg", "/assets/**").permitAll()
 				.requestMatchers(HttpMethod.POST, "/platform/v1/accounts", "/platform/v1/session").permitAll()
 				.requestMatchers("/platform/v1/**").hasAuthority(SessionAuthFilter.ROLE)
 				.requestMatchers("/api/v1/**").hasAuthority(ApiKeyFilter.ROLE)
