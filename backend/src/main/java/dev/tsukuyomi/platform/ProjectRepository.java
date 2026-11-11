@@ -39,6 +39,15 @@ public class ProjectRepository {
 				accountId);
 	}
 
+	/**
+	 * Locks the account row until the surrounding transaction ends. Two
+	 * "create project" requests for the same account then run one after the
+	 * other, so both cannot pass the quota check at the same moment.
+	 */
+	void lockAccount(UUID accountId) {
+		jdbc.queryForObject("select id from tsk_platform.account where id = ? for update", UUID.class, accountId);
+	}
+
 	int countByAccount(UUID accountId) {
 		return jdbc.queryForObject("select count(*) from tsk_platform.project where account_id = ?", Integer.class,
 				accountId);

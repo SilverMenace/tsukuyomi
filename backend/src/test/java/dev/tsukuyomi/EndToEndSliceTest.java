@@ -248,6 +248,21 @@ class EndToEndSliceTest {
 	}
 
 	@Test
+	void projectQuotaHoldsUnderConcurrentRequests() throws Exception {
+		TestClient dashboard = new TestClient(port);
+		assertThat(dashboard.signup(uniqueEmail()).status()).isEqualTo(201);
+
+		// Ten "create project" requests at once; the quota is three.
+		try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+			for (int i = 0; i < 10; i++) {
+				String body = "{\"name\":\"race-" + i + "\"}";
+				executor.submit(() -> dashboard.post("/platform/v1/projects", body));
+			}
+		}
+		assertThat(dashboard.get("/platform/v1/projects").json().size()).isEqualTo(3);
+	}
+
+	@Test
 	void deletingAProjectRemovesItsSchemaAndRoles() {
 		TestClient dashboard = new TestClient(port);
 		JsonNode project = newProjectWithNotes(dashboard, "doomed");

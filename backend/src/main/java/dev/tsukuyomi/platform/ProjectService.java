@@ -58,6 +58,7 @@ public class ProjectService {
 	public Created create(Account account, String rawName) {
 		String name = rawName.trim();
 		return transaction.execute(status -> {
+			projects.lockAccount(account.id());
 			if (projects.countByAccount(account.id()) >= maxProjects) {
 				throw ApiException.conflict("quota_projects", "this account already has " + maxProjects + " projects");
 			}
