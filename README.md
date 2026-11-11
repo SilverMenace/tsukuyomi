@@ -3,7 +3,9 @@
 **Design your tables in a browser and get a secured REST API, user auth, row-level permissions and
 live updates, without writing backend code.** A small, self-hostable backend-as-a-service.
 
-> Status: under construction (milestone M0 of 7). See `PLAN.md` for the build order.
+**Live:** https://tsukuyomi-l9kg.onrender.com (free hosting: the first request after 15 idle minutes takes about a minute to wake the server)
+
+> Status: under construction (milestone M0 of 7 done). See `PLAN.md` for the build order.
 
 ## Run locally
 
