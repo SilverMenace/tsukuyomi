@@ -20,3 +20,19 @@ jobs:
           cache: maven
       # Tests start a real PostgreSQL in Docker through Testcontainers.
       - run: ./mvnw -B verify
+
+  dashboard:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+      # Type-checks and builds; a type error fails the build.
+      - run: npm run build
