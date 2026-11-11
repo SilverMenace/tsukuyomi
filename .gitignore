@@ -1,0 +1,21 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# java / maven
+target/
+*.class
+
+# node
+node_modules/
+dist/
+
+# editors / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# claude code local settings
+.claude/
