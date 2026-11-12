@@ -5,10 +5,12 @@ live updates, without writing backend code.** A small, self-hostable backend-as-
 
 **Live:** https://tsukuyomi-l9kg.onrender.com (free hosting: the first request after 15 idle minutes takes about a minute to wake the server)
 
-> Status: under construction (M5 of 7 done: sign up, create a project, design and change tables
-> with relations and constraints as versioned migrations, a REST API with filtering, sorting,
-> pagination and related-record expansion, end-user signup and login, permission rules per table
-> enforced by the database, and live updates over WebSocket). See `PLAN.md` for the build order.
+**Demo app:** https://silvermenace.github.io/tsukuyomi/ is a task board with login, private tasks, a
+shared board and live updates. It is static files on GitHub Pages; everything else is one Tsukuyomi
+project. Source in [`demo/`](demo), about 300 lines, no backend code.
+
+> Status: under construction (M6 of 7 done: everything in the pitch works and is deployed; what
+> remains is rate limiting, quotas, measurements and final documentation). See `PLAN.md`.
 
 ## Run locally
 
@@ -235,6 +237,32 @@ Then, for each change you are allowed to see:
   host's proxy the close itself was measured to arrive about 20 seconds later, as code 1006.
 - **Limits:** 100 connections per project, 20 tables per connection. One server instance only.
 
+## JavaScript SDK and the demo app
+
+[`sdk/`](sdk) is a small TypeScript client (no dependencies) that wraps the REST API, end-user
+auth and live updates:
+
+```ts
+const db = createClient('https://tsukuyomi-l9kg.onrender.com', ANON_KEY)
+await db.auth.signIn(email, password)
+const { data, error } = await db.from('private_tasks').select().order('created_at', { ascending: false })
+db.subscribe('shared_tasks', { onEvent: (e) => render(e), onResync: () => reload() })
+```
+
+It refreshes access tokens, reconnects the WebSocket, asks for missed changes with the cursor and
+skips repeated events, so an app does not have to.
+
+[`demo/`](demo) is the proof of the pitch: a React app whose only "backend" is two tables and
+their rules, created by [`scripts/demo-project.mjs`](scripts/demo-project.mjs).
+
+| Table | Rule | Effect |
+|---|---|---|
+| `private_tasks` | owner, for all four operations | each user sees and changes only their own rows |
+| `shared_tasks` | authenticated for read, update, delete; owner for insert | every logged-in user sees and changes everything; the author id cannot be faked on insert |
+
+Honest limit: rules are per table and operation, not per column. On the shared board any logged-in
+user can edit any field of any row, including the author's name.
+
 ## Documents
 
 - `PLAN.md`: architecture, data model, milestones
@@ -244,7 +272,7 @@ Then, for each change you are allowed to see:
 ## Next (not in v1)
 
 File storage, webhooks, billing, teams, visual polish, email verification and password reset,
-OAuth logins, custom SQL rule expressions, WAL-based realtime, multi-instance realtime.
+OAuth logins, custom SQL rule expressions, per-column rules, column defaults, WAL-based realtime, multi-instance realtime.
 
 ---
 

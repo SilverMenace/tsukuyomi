@@ -536,3 +536,50 @@ Three cases end with a `resync` message (or `"resync": true` in the answer to `s
   column is created. Remove and add the column to change it.
 - **Per-table switch for live updates** (planned as `SetRealtime`). Every table records changes;
   the cost is one small insert per write (D31), and nobody receives anything without subscribing.
+
+## M6 — SDK and demo app
+
+### D41. The SDK returns `{ data, error }` and never throws for a refusal
+
+- A refused write (403), a broken filter (400) or a wrong password (401) is a normal outcome an
+  app must handle, so it is a value, not an exception. Network failures use the same shape with
+  status 0, so there is one place to look.
+- **Alternative:** throw and let the app `try/catch`. Shorter happy path, but a forgotten `catch`
+  becomes an unhandled rejection, and TypeScript cannot remind you. With the union type,
+  `data` is `null` until you have checked `error`.
+- The query builder is "thenable": it sends the request when awaited. That is what makes
+  `await db.from('t').select().eq(…)` read naturally. Cost: forgetting `await` sends nothing.
+
+### D42. What the SDK hides, and what it deliberately does not
+
+- **Hidden:** trading the refresh token for a new pair (one refresh shared by all waiting
+  requests, because a refresh token works once); retrying a request once after `invalid_token`;
+  reconnecting the WebSocket with growing pauses; sending the cursor; skipping repeated events;
+  closing its side at once on a terminal error (the server's close arrives late on the live host).
+- **Not hidden:** `onResync`. When the server cannot say what was missed, only the app knows how
+  to reload its data, so the SDK passes that on instead of pretending to be exactly-once.
+- **Logging in or out reconnects.** A connection has one identity for life (D37), and what the
+  new identity may see is different, so cursors are dropped and subscribers get `onResync`.
+- **Two tabs:** both hold the same refresh token. If both refresh at once one is refused; that
+  tab looks in storage for the session the other tab saved before giving up.
+
+### D43. The SDK is imported by path, not published
+
+- `demo/` imports `../sdk/src/index.ts` directly and Vite bundles it. No npm account, no build
+  step for the SDK, and the code you read is the code that runs.
+- The SDK uses only syntax that can be erased to get JavaScript (no enums, no constructor
+  parameter properties), so Node runs its tests without a compile step.
+- **Cost:** nobody else can `npm install` it. Publishing is a few lines of configuration later.
+
+### D44. The demo's access model, and its honest limit
+
+- Two tables instead of one table with a "shared" flag, because a rule applies to a whole table
+  and operation; there is no "owner OR flag" rule yet.
+- The shared board is open to every logged-in user for read, update and delete. Insert uses the
+  owner rule so `author_id` is always the caller. A security review noted that `author_name`
+  and even `author_id` can then be changed by an update. True, and inherent: rules are not per
+  column. The page says "can see and change everything"; the README states the limit.
+- Signup is open with no email check, so the shared board can be vandalised. Quotas and rate
+  limits (M7) bound the damage; they do not prevent it.
+- The anon key is committed in `demo/src/config.ts` on purpose. It is the public half of the
+  design: it identifies the project, and the rules decide what it may do.
