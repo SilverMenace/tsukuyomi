@@ -1,5 +1,7 @@
 package dev.tsukuyomi.common.security;
 
+import java.util.List;
+
 import dev.tsukuyomi.common.ApiErrorHandler;
 import dev.tsukuyomi.data.ApiKeyFilter;
 import dev.tsukuyomi.platform.SessionAuthFilter;
@@ -17,6 +19,9 @@ import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 /**
  * HTTP security: deny by default.
@@ -36,6 +41,7 @@ public class SecurityConfig {
 			.sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
 			// See DECISIONS.md D9 for why the built-in CSRF tokens are off.
 			.csrf(AbstractHttpConfigurer::disable)
+			.cors(cors -> cors.configurationSource(corsForPublicApi()))
 			.addFilterBefore(sessionAuthFilter, UsernamePasswordAuthenticationFilter.class)
 			.addFilterBefore(apiKeyFilter, UsernamePasswordAuthenticationFilter.class)
 			.exceptionHandling(e -> e.authenticationEntryPoint(unauthorizedAsJson(json)))
@@ -45,7 +51,7 @@ public class SecurityConfig {
 				.requestMatchers(HttpMethod.GET, "/", "/index.html", "/favicon.svg", "/assets/**").permitAll()
 				.requestMatchers(HttpMethod.POST, "/platform/v1/accounts", "/platform/v1/session").permitAll()
 				.requestMatchers("/platform/v1/**").hasAuthority(SessionAuthFilter.ROLE)
-				.requestMatchers("/api/v1/**").hasAuthority(ApiKeyFilter.ROLE)
+				.requestMatchers("/api/v1/**", "/auth/v1/**").hasAuthority(ApiKeyFilter.ROLE)
 				.anyRequest().denyAll());
 		return http.build();
 	}
@@ -67,6 +73,27 @@ public class SecurityConfig {
 		FilterRegistrationBean<ApiKeyFilter> registration = new FilterRegistrationBean<>(filter);
 		registration.setEnabled(false);
 		return registration;
+	}
+
+	/**
+	 * Browsers block a page on one site from calling another site unless that
+	 * site opts in (CORS). Apps built on a project run on their own domains, so
+	 * the public API must opt in for every origin. That is safe here because
+	 * these endpoints never use cookies: a foreign page cannot ride on a
+	 * visitor's login, it can only send keys and tokens it already holds.
+	 * The dashboard's /platform endpoints use a cookie and stay same-origin only.
+	 */
+	private static CorsConfigurationSource corsForPublicApi() {
+		CorsConfiguration config = new CorsConfiguration();
+		config.setAllowedOrigins(List.of("*"));
+		config.setAllowedMethods(List.of("GET", "POST", "PATCH", "DELETE"));
+		config.setAllowedHeaders(List.of("apikey", "authorization", "content-type", "prefer"));
+		config.setExposedHeaders(List.of("X-Total-Count"));
+		config.setMaxAge(3600L);
+		UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+		source.registerCorsConfiguration("/api/**", config);
+		source.registerCorsConfiguration("/auth/**", config);
+		return source;
 	}
 
 	private AuthenticationEntryPoint unauthorizedAsJson(ObjectMapper json) {
