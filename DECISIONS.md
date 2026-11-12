@@ -193,3 +193,88 @@ Newest milestones are at the bottom. Each entry is written so you can answer
   green. Render deploys `main` automatically.
 - **Why:** a platform migration (Flyway) that reaches the live database cannot be edited afterwards,
   so it should have passed tests first.
+
+---
+
+## M2 — query compiler
+
+### D18. A compiler in three stages, with a trust boundary in the middle
+
+- **Question:** how do you turn `?select=…&priority=gte.3&order=…` into SQL without ever letting
+  request text become SQL?
+- **Options:**
+  1. *Build SQL strings directly in the controller*, escaping as you go. Every new feature is a new
+     chance to forget an escape.
+  2. *Use a query-builder library* (jOOQ, Criteria API). Safe for values, but table and column names
+     are still strings we would pass in, and we would not learn how it works.
+  3. *A small compiler:* parse → validate → build.
+- **Choice:** option 3.
+  - `QueryParser` only understands shape. Its output (`RawQuery`) is still untrusted text.
+  - `QueryValidator` is the trust boundary. It looks every name up in the catalog and stores the
+    catalog's object in the AST, not the request's string. Unknown name → 400.
+  - `SqlBuilder` turns the AST into SQL.
+- **Why this is safe by construction:** `SqlBuilder` has no public method that takes a `String`, and
+  the only AST type that can hold request text is `Param`, which is only ever emitted as `?`.
+  Identifiers pass through `Identifiers.quote`, which re-checks the name pattern, so even a bug in
+  the validator cannot push unsafe text into SQL.
+- **Trade-off:** more code than string building, and each new feature touches three places.
+
+### D19. Proving it: four kinds of test, each catching what the others cannot
+
+| Test | What it proves | What it cannot prove |
+|---|---|---|
+| `SqlBuilderContractTest` (reflection) | the structural rules above still hold after future edits | that the SQL is correct |
+| `InjectionTest` corpus | known payloads, in every position, are rejected or bound | unknown payloads |
+| `InjectionTest` fuzzer (40,000 seeded random requests) | no combination of SQL fragments yields SQL outside a strict alphabet | behaviour in a real database |
+| `QueryApiTest` over HTTP + real Postgres | ~360 attacks change nothing in the database and never cause a 5xx | exhaustiveness |
+
+- The unit tests judge the SQL with an **independent oracle** (`assertSafe`): only known identifiers
+  in quotes, only fixed keywords outside them, placeholders equal to parameters. It does not reuse
+  the builder's logic, so it cannot share the builder's blind spots.
+- **Why a hand-written fuzzer and not jqwik** (as first planned): jqwik's engine targets the JUnit 5
+  platform and the project is on JUnit 6. A seeded `java.util.Random` loop is 30 lines, has no
+  dependency, and a failure reproduces exactly because the seed is fixed.
+- **It found real bugs:** a zero byte in a parameter name returned 500 (now 400), and rows inserted in
+  one batch came back in random order (see D22).
+
+### D20. Related records as correlated sub-selects that return JSON
+
+- **Options:** run one query per parent row (the "N+1" problem); join and regroup rows in Java; or
+  let Postgres nest the related rows as JSON inside the parent row.
+- **Choice:** a sub-select per expansion using `row_to_json` (one object) or `json_agg` (a list).
+- **Why:** one round trip for any depth, no regrouping code, and row-level security applies to the
+  related table automatically because the sub-select runs as the same role.
+- **Limits:** depth 2, 100 related rows per parent, so one URL cannot ask for an unbounded tree.
+  Expanding a table into itself is not supported yet.
+- **An index on every foreign-key column** is created by the planner: Postgres indexes the
+  referenced side but not the referencing side, and to-many expansion filters on the latter.
+
+### D21. URL syntax modelled on PostgREST
+
+- **Choice:** `column=operator.value`, `select=a,b,rel(c)`, `order=col.desc`.
+- **Why:** it is a proven design with public documentation to compare against, it maps cleanly to
+  query strings without a request body, and `*` as the `like` wildcard avoids `%` escaping in URLs.
+- **Trade-off:** no `OR` between filters in v1; a value for `in` cannot contain a comma.
+
+### D22. `uuidv7()` ids, and a total order for pagination
+
+- **Problem found by a test:** `created_at` defaults to `now()`, which is the *transaction's* start
+  time, so rows inserted in one batch tie, and random UUIDs broke the tie randomly.
+- **Choice:** ids default to `uuidv7()` (PostgreSQL 18), whose leading bits are a timestamp. Every
+  query ends its `ORDER BY` with `id`.
+- **Why:** offset pagination is only correct if the order is total; otherwise a row can appear on
+  two pages or none. Time-ordered ids also keep the primary-key index compact, because new entries
+  always go at the end instead of in random places.
+- **Trade-off:** requires PostgreSQL 18+; ids reveal creation time (so does `created_at`).
+
+### D23. Updates and deletes must have a filter
+
+- **Choice:** `PATCH` and `DELETE` without any filter are rejected with 400.
+- **Why:** "change every row" is almost always a mistake, and it is the most destructive one the API
+  can make. Being explicit costs the caller one parameter.
+
+### D24. Limits on every request
+
+- **Choice:** `QueryLimits` caps page size (100), offset, number of filters (20), `in` list (100),
+  value length, expansion depth and batch size; `TenantTransaction` adds a 3-second statement timeout.
+- **Why:** on shared infrastructure, one tenant's expensive request is every tenant's slow request.
