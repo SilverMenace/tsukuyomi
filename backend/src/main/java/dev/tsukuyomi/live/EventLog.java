@@ -49,6 +49,15 @@ public class EventLog {
 				schema, table, txid, limit);
 	}
 
+	/**
+	 * For a delete: the value the deleted row had in {@code column}, or null.
+	 * Used with the owner column to find out whose row it was.
+	 */
+	String deletedValue(long eventId, String column) {
+		return jdbc.query("select old_row ->> ? from tsk_platform.change_event where id = ?",
+				rs -> rs.next() ? rs.getString(1) : null, column, eventId);
+	}
+
 	/** Changes from transactions below this id may have been deleted already. */
 	long floor() {
 		return jdbc.queryForObject("select txid from tsk_platform.change_floor", Long.class);

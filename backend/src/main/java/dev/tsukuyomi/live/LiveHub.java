@@ -14,7 +14,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import dev.tsukuyomi.data.RowService;
+import dev.tsukuyomi.schema.CatalogService;
+import dev.tsukuyomi.schema.Rule;
+import dev.tsukuyomi.schema.RuleOperation;
 import dev.tsukuyomi.tenancy.TenantIdentity;
+import dev.tsukuyomi.tenancy.TenantRole;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,12 +33,13 @@ import org.springframework.stereotype.Component;
  * The middle of live updates: knows who is subscribed to what, and turns each
  * change in the database into messages for the clients that may see it.
  *
- * WHO MAY SEE A CHANGE. The hub never looks at permission rules. For each
- * change it reads the row once per distinct identity subscribed to that table
- * (RowService.findById, which runs as that identity's Postgres role). If
- * row-level security hides the row, the read returns nothing and those clients
- * are told nothing. A deleted row cannot be read any more, so a delete is sent
- * to every subscriber of the table, with the row's id only.
+ * WHO MAY SEE A CHANGE. For an insert or update the hub does not look at
+ * permission rules at all. It reads the row once per distinct identity
+ * subscribed to that table (RowService.findById, which runs as that identity's
+ * Postgres role). If row-level security hides the row, the read returns
+ * nothing and those clients are told nothing. A deleted row cannot be read any
+ * more; for deletes only, the hub applies the table's read rule itself to the
+ * copy of the row the trigger kept (couldSeeDeletedRow), and sends just the id.
  *
  * ONE THREAD. Everything here runs on a single "dispatcher" thread: changes,
  * subscribe, unsubscribe, disconnect. Other threads only put a task in its
@@ -94,6 +99,8 @@ public class LiveHub implements ChangeListener.Sink, DisposableBean {
 
 	private final RowService rows;
 
+	private final CatalogService catalogs;
+
 	private final ObjectMapper json;
 
 	private final ExecutorService dispatcher = Executors
@@ -110,7 +117,13 @@ public class LiveHub implements ChangeListener.Sink, DisposableBean {
 
 	private int subscriptionCount;
 
-	LiveHub(ChangeListener listener, EventLog events, RowService rows, ObjectMapper json) {
+	/** One-entry cache for deletedOwner. */
+	private long ownerOfEvent = -1;
+
+	private String owner;
+
+	LiveHub(ChangeListener listener, EventLog events, RowService rows, CatalogService catalogs, ObjectMapper json) {
+		this.catalogs = catalogs;
 		this.listener = listener;
 		this.events = events;
 		this.rows = rows;
@@ -254,7 +267,12 @@ public class LiveHub implements ChangeListener.Sink, DisposableBean {
 	/** Reads the row as {@code identity} and, if it is visible, sends the event to the subscriptions. */
 	private void deliver(ChangeEvent event, TenantIdentity identity, List<Subscription> subscriptions) {
 		JsonNode row = null;
-		if (!event.isDelete()) {
+		if (event.isDelete()) {
+			if (!couldSeeDeletedRow(event, identity)) {
+				return;
+			}
+		}
+		else {
 			try {
 				row = rows.findById(identity, event.table(), event.rowId());
 			}
@@ -287,6 +305,49 @@ public class LiveHub implements ChangeListener.Sink, DisposableBean {
 				drop(client);
 			}
 		}
+	}
+
+	/**
+	 * A deleted row cannot be read any more, so row-level security cannot answer
+	 * "could this identity see it?". This is the one place where the hub applies
+	 * the table's read rule itself, using the copy of the row the trigger kept.
+	 * It mirrors the policies in MigrationPlanner and, when unsure, says no.
+	 */
+	private boolean couldSeeDeletedRow(ChangeEvent event, TenantIdentity identity) {
+		if (identity.role() == TenantRole.SERVICE) {
+			return true;
+		}
+		Rule rule;
+		try {
+			rule = catalogs.get(identity.project().id())
+				.table(event.table())
+				.map(table -> table.rule(RuleOperation.SELECT))
+				.orElse(Rule.NOBODY);
+		}
+		catch (RuntimeException e) {
+			return false; // e.g. the project was deleted meanwhile
+		}
+		return switch (rule.kind()) {
+			case NOBODY -> false;
+			case ANYONE -> true;
+			case AUTHENTICATED -> identity.role() == TenantRole.USER;
+			case OWNER -> identity.role() == TenantRole.USER
+					&& identity.userId().toString().equals(deletedOwner(event, rule.ownerColumn()));
+		};
+	}
+
+	/** Looked up once per delete event, however many users are subscribed. */
+	private String deletedOwner(ChangeEvent event, String ownerColumn) {
+		if (ownerOfEvent != event.id()) {
+			try {
+				owner = events.deletedValue(event.id(), ownerColumn);
+			}
+			catch (RuntimeException e) {
+				owner = null;
+			}
+			ownerOfEvent = event.id();
+		}
+		return owner;
 	}
 
 	/** We lost track of what happened (listener reconnect or overload): every client must reload. */

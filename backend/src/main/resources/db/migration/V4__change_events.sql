@@ -1,8 +1,8 @@
 -- Live updates: every change to a row of a project table is recorded here,
 -- and announced with NOTIFY so the server hears about it immediately.
 
--- The log of changes ("outbox"). It says WHICH row changed, never what is in
--- it: subscribers get the row by reading it under their own identity, so
+-- The log of changes ("outbox"). It says WHICH row changed; subscribers get
+-- the row itself by reading it under their own identity, so
 -- row-level security decides who sees what. Kept for about ten minutes, so a
 -- client that lost its connection can ask for what it missed.
 create table tsk_platform.change_event (
@@ -17,6 +17,10 @@ create table tsk_platform.change_event (
     -- transaction with a smaller id had already finished. This is what makes
     -- "give me what I missed" correct; see DECISIONS.md D33.
     oldest_running bigint not null,
+    -- Deletes only: the row as it was. Never sent to anyone. It is kept so the
+    -- server can tell whom the row belonged to, and announce the delete only
+    -- to those who could have seen the row (DECISIONS.md D32).
+    old_row     jsonb,
     created_at  timestamptz not null default clock_timestamp()
 );
 create index change_event_replay on tsk_platform.change_event (schema_name, table_name, txid);
@@ -38,14 +42,20 @@ create function tsk.record_change() returns trigger
     as $$
 declare
     rid  uuid;
+    gone jsonb;
     eid  bigint;
     tx   bigint := pg_current_xact_id()::text::bigint;
     low  bigint := pg_snapshot_xmin(pg_current_snapshot())::text::bigint;
     kind text := lower(tg_op);
 begin
-    if tg_op = 'DELETE' then rid := old.id; else rid := new.id; end if;
-    insert into tsk_platform.change_event (schema_name, table_name, op, row_id, txid, oldest_running)
-        values (tg_table_schema, tg_table_name, kind, rid, tx, low)
+    if tg_op = 'DELETE' then
+        rid := old.id;
+        gone := to_jsonb(old);
+    else
+        rid := new.id;
+    end if;
+    insert into tsk_platform.change_event (schema_name, table_name, op, row_id, txid, oldest_running, old_row)
+        values (tg_table_schema, tg_table_name, kind, rid, tx, low, gone)
         returning id into eid;
     -- Delivered to listeners when (and only if) this transaction commits.
     perform pg_notify('tsk_changes', json_build_object(
