@@ -219,8 +219,8 @@ Then, for each change you are allowed to see:
 
 - **Permissions:** you receive a change only if a `GET` of that row would return it to you. The
   same rules apply; there is nothing extra to configure.
-- **`op`** is `insert`, `update` or `delete`. For `delete`, `row` is `null`, and it is sent to
-  every subscriber of the table (the row is gone, so it cannot be checked). It reveals only the id.
+- **`op`** is `insert`, `update` or `delete`. For `delete`, `row` is `null` (only the id is
+  sent), and it goes only to those the table's read rule would have shown the row to.
 - **Reconnecting:** remember the last `cursor`. Send it as `since` when you subscribe again and
   you get what you missed. The same event can arrive twice; ignore an `eventId` you have seen.
 - **`resync`:** if the answer says `"resync": true`, or a `{"type":"resync","table":…}` message
@@ -228,7 +228,7 @@ Then, for each change you are allowed to see:
   changes, or a server-side reconnect). Load the table again with the REST API.
 - **Errors:** `{"type":"error","code":"…","message":"…"}`. Codes: `unauthorized`, `invalid_key`,
   `invalid_token`, `token_expired` (connection closes with code 4401), `unknown_table`,
-  `already_subscribed`, `too_many_subscriptions`, `too_many_connections`, `bad_message`,
+  `access_changed` (a key was replaced; reconnect), `already_subscribed`, `too_many_subscriptions`, `too_many_connections`, `bad_message`,
   `unavailable`.
 - **Limits:** 100 connections per project, 20 tables per connection. One server instance only.
 

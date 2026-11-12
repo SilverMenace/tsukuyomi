@@ -197,6 +197,9 @@ The pieces, in the order a change passes through them:
 | Log | `live/EventLog.java` | Replay for reconnecting clients; trimmed after 10 minutes |
 | Endpoint | `live/LiveSocketHandler.java` | The JSON protocol on `/realtime/v1`, limits |
 
+Deletes: the row is gone, so it cannot be read. The trigger keeps a copy in the log and the hub
+applies the table's read rule to that copy; only the id is sent (DECISIONS.md D32).
+
 Reconnecting: the client sends `subscribe {table, since: <last cursor>}`. The hub reads the missed
 events from `change_event`, checks each against the client's identity exactly as above, and sends
 them before any new live event. If it cannot know what was missed it answers `resync: true` and

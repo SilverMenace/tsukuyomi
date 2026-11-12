@@ -405,10 +405,16 @@ The server has to find out that a row changed. Two ways:
   exactly what D25 refuses. Also, `NOTIFY` payloads are limited to about 8 KB.
 - **Cost:** one small transaction per identity per change. 50 users watching one table means 50
   reads for each change to it. Identities are grouped, so 50 anonymous visitors cost one read.
-- **Deletes are the exception.** A deleted row cannot be read, so a delete is sent to every
-  subscriber of the table with the row id only. Someone who could not see the row learns that
-  "some row with this id was deleted", and nothing else. Supabase makes the same trade-off.
-  Closing it would mean keeping the old row and evaluating policies against it by hand.
+- **Deletes are the exception.** A deleted row cannot be read, so row-level security cannot
+  answer for it. The first version sent deletes to every subscriber of the table with only the
+  row id; a security review pointed out that this tells people about rows they could never see
+  (Supabase accepts this trade-off). Now the trigger keeps the deleted row in the log
+  (`old_row`, never sent to clients), and `LiveHub.couldSeeDeletedRow` applies the table's read
+  rule to it: service always; `anyone` everyone; `authenticated` logged-in users; `owner` only
+  the user whose id was in the owner column; `nobody` no one else.
+- **Cost of that:** this is the one place where a rule is evaluated in Java, so it must be kept
+  in step with the policies `MigrationPlanner` generates. It uses the rule as it is now, not as
+  it was when the row was deleted. When unsure it does not send. Only the id is ever sent.
 - **Updates that hide a row** (the owner column changes): the old owner gets no message, because
   the row is no longer visible to them. Their copy goes stale until they reload.
 
@@ -475,7 +481,14 @@ Three cases end with a `resync` message (or `"resync": true` in the answer to `s
   token; nothing else is accepted before it, and silent connections are closed after 10 seconds.
 - The key and token go through the same `IdentityResolver` as HTTP requests, so there is one
   definition of "who is this".
+- A WebSocket is checked once, when it connects, unlike HTTP where every request shows its key.
+  So when a key is replaced or a project deleted, `ProjectService` publishes
+  `ProjectAccessChanged` and every live connection of that project is closed (found by a
+  security review; without it a leaked key would keep working on open connections).
 - A connection's identity never changes. When a user's token expires the server closes the
   connection with code 4401; the client reconnects with a fresh token and its cursor.
+- **Known gap:** connections that have not authenticated yet count towards the server-wide
+  limit for up to 10 seconds, and there is no per-address limit, so one machine can use up the
+  slots. Per-address limits come with rate limiting in M7.
 - Limits: 300 connections per server, 100 per project, 20 tables per connection, 4 KB per
   message. A client that cannot take its messages within 5 seconds is disconnected.
