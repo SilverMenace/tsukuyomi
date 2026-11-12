@@ -51,6 +51,16 @@ public class ApiErrorHandler {
 		return ResponseEntity.badRequest().body(body("invalid_json", "request body is not valid JSON for this endpoint"));
 	}
 
+	/**
+	 * Spring Security's firewall refuses requests with suspicious content, such
+	 * as control characters in a parameter name. That is the client's fault, so
+	 * it is a 400, not a 500.
+	 */
+	@ExceptionHandler(org.springframework.security.web.firewall.RequestRejectedException.class)
+	ResponseEntity<Map<String, Object>> handle(org.springframework.security.web.firewall.RequestRejectedException e) {
+		return ResponseEntity.badRequest().body(body("invalid_request", "the request contains characters that are not allowed"));
+	}
+
 	@ExceptionHandler(Exception.class)
 	ResponseEntity<Map<String, Object>> handle(Exception e) throws Exception {
 		// Let Spring handle its own exceptions (404 for unknown paths, 405, ...).
