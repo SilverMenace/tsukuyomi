@@ -5,10 +5,10 @@ live updates, without writing backend code.** A small, self-hostable backend-as-
 
 **Live:** https://tsukuyomi-l9kg.onrender.com (free hosting: the first request after 15 idle minutes takes about a minute to wake the server)
 
-> Status: under construction (M4 of 7 done: sign up, create a project, design tables with relations,
-> a REST API with filtering, sorting, pagination and related-record expansion, end-user signup and
-> login, permission rules per table enforced by the database, and live updates over WebSocket).
-> See `PLAN.md` for the build order.
+> Status: under construction (M5 of 7 done: sign up, create a project, design and change tables
+> with relations and constraints as versioned migrations, a REST API with filtering, sorting,
+> pagination and related-record expansion, end-user signup and login, permission rules per table
+> enforced by the database, and live updates over WebSocket). See `PLAN.md` for the build order.
 
 ## Run locally
 

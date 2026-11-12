@@ -497,3 +497,42 @@ Three cases end with a `resync` message (or `"resync": true` in the answer to `s
   slots. Per-address limits come with rate limiting in M7.
 - Limits: 300 connections per server, 100 per project, 20 tables per connection, 4 KB per
   message. A client that cannot take its messages within 5 seconds is disconnected.
+
+## M5 — changing existing tables
+
+### D38. Renames: what Postgres follows by itself and what we must carry
+
+- **Follows automatically:** rows, row-level security policies (a policy stores columns by
+  position, so `owner_id = tsk.uid()` survives renaming `owner_id`), the live-update trigger,
+  and foreign keys from other tables (Postgres identifies tables by an internal id).
+- **Does not follow:** names that we derived from the old name. Unique constraints, foreign keys
+  and indexes are named `<table>_<column>_key`, `_fkey`, `_idx`, and later migrations find them
+  by computing that name again. So a rename also renames them. Without this, "remove unique"
+  after a rename would look for a constraint that does not exist.
+  `SchemaChangesTest.renamesKeep…` drops and re-adds constraints after renaming to prove it.
+- **Our own catalog** stores names as text: the rule's owner column and other tables'
+  `references`. The planner updates both.
+- **Alternative:** look constraint names up in `pg_constraint` instead of deriving them. More
+  robust against drift, but the planner would no longer be pure (it would need the database),
+  and its tests would stop being millisecond unit tests.
+- **Consequence for apps:** a rename changes the API path and field names at once. There is no
+  alias period; clients must be updated together with the rename.
+
+### D39. "Required" and "unique" on existing data are decided by the database
+
+- The planner only checks what it can know from the catalog (the column exists, is not a system
+  column, the value actually changes). Whether existing rows allow the change (no nulls, no
+  duplicates) is checked by Postgres when the statement runs.
+- If Postgres refuses, the whole migration rolls back, including earlier operations in the same
+  request, and the owner sees the database's own first error line (`migration_failed`).
+- **Why not check first in Java:** it would be a second, weaker copy of the check, and it could
+  pass and then still fail if a row is written in between.
+
+### D40. Left out of the schema designer
+
+- **Changing a column's type.** Needs a conversion rule for existing values and can rewrite the
+  whole table. Remove and add the column instead.
+- **Adding or removing a foreign key on an existing column.** A reference is chosen when the
+  column is created. Remove and add the column to change it.
+- **Per-table switch for live updates** (planned as `SetRealtime`). Every table records changes;
+  the cost is one small insert per write (D31), and nobody receives anything without subscribing.

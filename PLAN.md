@@ -175,7 +175,8 @@ tables; forged and expired JWTs; JWT from project A used on project B; a deliber
 The GUI never sends SQL. It sends a list of **operations**:
 
 `CreateTable`, `DropTable`, `RenameTable`, `AddColumn`, `DropColumn`, `RenameColumn`, `SetNullable`,
-`AddUnique`, `DropUnique`, `AddForeignKey`, `DropForeignKey`, `SetRule`, `SetRealtime`.
+`SetUnique`, `SetRule`. (As built. A foreign key is chosen when its column is created. Changing a
+foreign key on an existing column and a per-table live-updates switch were cut; `DECISIONS.md` D40.)
 
 The backend:
 
