@@ -63,6 +63,10 @@ export type Operation =
   | { op: 'drop_table'; table: string }
   | { op: 'add_column'; table: string; column: ColumnSpec }
   | { op: 'drop_column'; table: string; column: string }
+  | { op: 'rename_table'; table: string; to: string }
+  | { op: 'rename_column'; table: string; column: string; to: string }
+  | { op: 'set_nullable'; table: string; column: string; nullable: boolean }
+  | { op: 'set_unique'; table: string; column: string; unique: boolean }
   | { op: 'set_rule'; table: string; operation: RuleOperation; rule: RuleKind; ownerColumn?: string }
 
 export type MigrationResult = { version: number; sql: string; applied: boolean }

@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { Fragment, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { api, COLUMN_TYPES, errorMessage } from '../api.ts'
-import type { ColumnSpec, ColumnType, OnDelete, Operation, Table } from '../api.ts'
+import type { Column, ColumnSpec, ColumnType, OnDelete, Operation, Table } from '../api.ts'
 
 const emptyColumn = (): ColumnSpec => ({ name: '', type: 'text', nullable: true, unique: false })
 
@@ -59,15 +59,113 @@ export default function TablesPage({ projectId }: { projectId: string }) {
       ))}
 
       <NewTableForm tables={tableNames} run={run} busy={migrate.isPending} />
+      <Relations tables={schema.data.tables} />
     </div>
   )
 }
 
 type Run = (operations: Operation[], dryRun?: boolean) => void
 
+// The backend only accepts names like this; checking here just saves a round trip.
+const NAME_PATTERN = /^[a-z][a-z0-9_]{0,27}$/
+
+/** Read-only list of foreign keys: which column points at which table. */
+function Relations({ tables }: { tables: Table[] }) {
+  const relations = tables.flatMap((t) =>
+    t.columns
+      .filter((c) => c.references)
+      .map((c) => `${t.name}.${c.name} → ${c.references}.id (on delete ${(c.onDelete ?? 'restrict').replace('_', ' ')})`),
+  )
+  return (
+    <div className="card stack">
+      <h2>Relations</h2>
+      {relations.length === 0 && <p className="muted">No relations yet</p>}
+      {relations.map((line) => <div key={line}>{line}</div>)}
+    </div>
+  )
+}
+
+/** Inline form that renames a table. The built-in users table never shows it. */
+function RenameTable({ table, run, busy, onDone }: { table: string; run: Run; busy: boolean; onDone: () => void }) {
+  const [name, setName] = useState(table)
+  const valid = NAME_PATTERN.test(name) && name !== table
+
+  function submit(dryRun: boolean) {
+    run([{ op: 'rename_table', table, to: name }], dryRun)
+    if (!dryRun) {
+      onDone()
+    }
+  }
+
+  return (
+    <div className="row">
+      <input placeholder="new table name" value={name} onChange={(e) => setName(e.target.value)} />
+      <button disabled={busy || !valid} onClick={() => submit(true)}>Preview SQL</button>
+      <button disabled={busy || !valid} onClick={() => submit(false)}>Save table name</button>
+      <button className="link" onClick={onDone}>cancel</button>
+    </div>
+  )
+}
+
+/**
+ * Inline editor for one existing column. It sends only what changed, in the
+ * order set_nullable, set_unique, rename_column, so each step still finds the
+ * column under its old name.
+ */
+function ColumnEditor({ table, column, run, busy, onDone }: {
+  table: Table; column: Column; run: Run; busy: boolean; onDone: () => void
+}) {
+  const [name, setName] = useState(column.name)
+  const [required, setRequired] = useState(!column.nullable)
+  const [unique, setUnique] = useState(column.unique)
+
+  const operations = (): Operation[] => {
+    const ops: Operation[] = []
+    if (required !== !column.nullable) {
+      ops.push({ op: 'set_nullable', table: table.name, column: column.name, nullable: !required })
+    }
+    if (unique !== column.unique) {
+      ops.push({ op: 'set_unique', table: table.name, column: column.name, unique })
+    }
+    if (name !== column.name) {
+      ops.push({ op: 'rename_column', table: table.name, column: column.name, to: name })
+    }
+    return ops
+  }
+  const ready = NAME_PATTERN.test(name) && operations().length > 0
+
+  function submit(dryRun: boolean) {
+    run(operations(), dryRun)
+    if (!dryRun) {
+      onDone()
+    }
+  }
+
+  return (
+    <div className="row">
+      <input className="grow" placeholder="column name" value={name} onChange={(e) => setName(e.target.value)} />
+      <label className="check">
+        {/* columns the owner adds to the built-in users table must stay optional */}
+        <input type="checkbox" checked={required} disabled={table.builtin} onChange={(e) => setRequired(e.target.checked)} />
+        required
+      </label>
+      <label className="check">
+        {/* a jsonb value cannot be compared for equality, so it cannot be unique */}
+        <input type="checkbox" checked={unique} disabled={column.type === 'jsonb'} onChange={(e) => setUnique(e.target.checked)} />
+        unique
+      </label>
+      <button disabled={busy || !ready} onClick={() => submit(true)}>Preview SQL</button>
+      <button disabled={busy || !ready} onClick={() => submit(false)}>Save column</button>
+      <button className="link" onClick={onDone}>cancel</button>
+    </div>
+  )
+}
+
 function TableCard({ table, tables, run, busy }: { table: Table; tables: string[]; run: Run; busy: boolean }) {
   const { projectId = '' } = useParams()
   const [column, setColumn] = useState<ColumnSpec>(emptyColumn())
+  const [renaming, setRenaming] = useState(false) // is the table-name editor open?
+  const [editing, setEditing] = useState('') // name of the column whose editor is open
 
   function addColumn(dryRun: boolean) {
     run([{ op: 'add_column', table: table.name, column }], dryRun)
@@ -81,6 +179,9 @@ function TableCard({ table, tables, run, busy }: { table: Table; tables: string[
       <div className="row">
         <h2>{table.name}</h2>
         {table.builtin && <span className="muted">(built in)</span>}
+        {!table.builtin && !renaming && (
+          <button className="link" disabled={busy} onClick={() => setRenaming(true)}>rename</button>
+        )}
         <span className="grow" />
         <Link to={`/projects/${projectId}/data/${table.name}`}>Browse rows</Link>
         {!table.builtin && (
@@ -92,31 +193,46 @@ function TableCard({ table, tables, run, busy }: { table: Table; tables: string[
           </button>
         )}
       </div>
+      {renaming && (
+        <RenameTable table={table.name} run={run} busy={busy} onDone={() => setRenaming(false)} />
+      )}
       <table>
         <thead>
           <tr><th>Column</th><th>Type</th><th>Required</th><th>Unique</th><th /></tr>
         </thead>
         <tbody>
           {table.columns.map((c) => (
-            <tr key={c.name}>
-              <td>{c.name} {c.system && <span className="muted small">(automatic)</span>}</td>
-              <td>
-                {c.type}
-                {c.references && <span className="muted"> → {c.references} ({(c.onDelete ?? 'restrict').replace('_', ' ')})</span>}
-              </td>
-              <td>{c.nullable ? '' : 'yes'}</td>
-              <td>{c.unique ? 'yes' : ''}</td>
-              <td>
-                {!c.system && (
-                  <button
-                    className="link danger" disabled={busy}
-                    onClick={() => window.confirm(`Delete column "${c.name}" and its data?`) && run([{ op: 'drop_column', table: table.name, column: c.name }])}
-                  >
-                    remove
-                  </button>
-                )}
-              </td>
-            </tr>
+            <Fragment key={c.name}>
+              <tr>
+                <td>{c.name} {c.system && <span className="muted small">(automatic)</span>}</td>
+                <td>
+                  {c.type}
+                  {c.references && <span className="muted"> → {c.references} ({(c.onDelete ?? 'restrict').replace('_', ' ')})</span>}
+                </td>
+                <td>{c.nullable ? '' : 'yes'}</td>
+                <td>{c.unique ? 'yes' : ''}</td>
+                <td>
+                  {!c.system && (
+                    <>
+                      <button className="link" disabled={busy} onClick={() => setEditing(c.name)}>edit</button>
+                      <button
+                        className="link danger" disabled={busy}
+                        onClick={() => window.confirm(`Delete column "${c.name}" and its data?`) && run([{ op: 'drop_column', table: table.name, column: c.name }])}
+                      >
+                        remove
+                      </button>
+                    </>
+                  )}
+                </td>
+              </tr>
+              {editing === c.name && (
+                <tr>
+                  <td colSpan={5}>
+                    <ColumnEditor table={table} column={c} run={run} busy={busy} onDone={() => setEditing('')} />
+                  </td>
+                </tr>
+              )}
+            </Fragment>
           ))}
         </tbody>
       </table>
