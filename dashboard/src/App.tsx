@@ -22,8 +22,11 @@ export default function App() {
 
   async function logout() {
     await api.logout()
-    queryClient.clear()
-    await queryClient.invalidateQueries({ queryKey: ['me'] })
+    // Throw away everything cached for the old account, then ask "who am I?"
+    // again. The answer is now 401, which shows the login page. (clear() alone
+    // empties the cache but does not make the mounted query fetch again.)
+    queryClient.removeQueries({ predicate: (q) => q.queryKey[0] !== 'me' })
+    await queryClient.resetQueries({ queryKey: ['me'] })
   }
 
   return (
