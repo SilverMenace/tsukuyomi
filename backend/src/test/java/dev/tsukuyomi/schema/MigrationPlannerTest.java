@@ -9,7 +9,11 @@ import dev.tsukuyomi.schema.SchemaOperation.ColumnSpec;
 import dev.tsukuyomi.schema.SchemaOperation.CreateTable;
 import dev.tsukuyomi.schema.SchemaOperation.DropColumn;
 import dev.tsukuyomi.schema.SchemaOperation.DropTable;
+import dev.tsukuyomi.schema.SchemaOperation.RenameColumn;
+import dev.tsukuyomi.schema.SchemaOperation.RenameTable;
+import dev.tsukuyomi.schema.SchemaOperation.SetNullable;
 import dev.tsukuyomi.schema.SchemaOperation.SetRule;
+import dev.tsukuyomi.schema.SchemaOperation.SetUnique;
 import dev.tsukuyomi.tenancy.ProjectRef;
 
 import org.junit.jupiter.api.Test;
@@ -245,6 +249,81 @@ class MigrationPlannerTest {
 		Catalog ruled = planner.plan(project, start, List.of(new SetRule("notes", RuleOperation.SELECT, RuleKind.OWNER, "owner_id"))).result();
 		assertThatThrownBy(() -> planner.plan(project, ruled, List.of(new DropColumn("notes", "owner_id"))))
 			.hasMessageContaining("change the rule first");
+	}
+
+	/** lists(title unique, owner -> itself) and items(list_id -> lists), with an owner rule on lists. */
+	private Catalog listsAndItems() {
+		return planner.plan(project, Catalog.empty(), List.of(
+				new CreateTable("lists", List.of(new ColumnSpec("title", ColumnType.TEXT, null, true),
+						new ColumnSpec("owner", ColumnType.UUID, null, null))),
+				new CreateTable("items",
+						List.of(new ColumnSpec("list_id", ColumnType.UUID, false, null, "lists", OnDelete.CASCADE))),
+				new SetRule("lists", RuleOperation.SELECT, RuleKind.OWNER, "owner")))
+			.result();
+	}
+
+	@Test
+	void renameTableRenamesItsConstraintsAndFixesReferencesInTheCatalog() {
+		var plan = planner.plan(project, listsAndItems(), List.of(new RenameTable("lists", "boards")));
+
+		assertThat(plan.statements()).containsExactly(
+				"alter table \"p_0123456789ab\".\"lists\" rename to \"boards\"",
+				"alter table \"p_0123456789ab\".\"boards\" rename constraint \"lists_title_key\" to \"boards_title_key\"");
+		Catalog after = plan.result();
+		assertThat(after.table("lists")).isEmpty();
+		assertThat(after.table("boards").orElseThrow().rule(RuleOperation.SELECT).ownerColumn()).isEqualTo("owner");
+		// The other table's column now points at the new name.
+		assertThat(after.table("items").orElseThrow().column("list_id").orElseThrow().references()).isEqualTo("boards");
+	}
+
+	@Test
+	void renameColumnRenamesKeyIndexAndTheRuleThatUsesIt() {
+		Catalog start = listsAndItems();
+		var reference = planner.plan(project, start, List.of(new RenameColumn("items", "list_id", "board_id")));
+		assertThat(reference.statements()).containsExactly(
+				"alter table \"p_0123456789ab\".\"items\" rename column \"list_id\" to \"board_id\"",
+				"alter table \"p_0123456789ab\".\"items\" rename constraint \"items_list_id_fkey\" to \"items_board_id_fkey\"",
+				"alter index \"p_0123456789ab\".\"items_list_id_idx\" rename to \"items_board_id_idx\"");
+
+		var owner = planner.plan(project, start, List.of(new RenameColumn("lists", "owner", "author")));
+		// No policy statement: Postgres keeps the policy pointing at the column.
+		assertThat(owner.statements()).hasSize(1);
+		assertThat(owner.result().table("lists").orElseThrow().rule(RuleOperation.SELECT))
+			.isEqualTo(new Rule(RuleKind.OWNER, "author"));
+		// Position is kept: id, created_at, title, author.
+		assertThat(owner.result().table("lists").orElseThrow().columns()).extracting(ColumnDef::name)
+			.containsExactly("id", "created_at", "title", "author");
+	}
+
+	@Test
+	void requiredAndUniqueCanBeSwitched() {
+		Catalog start = listsAndItems();
+		var plan = planner.plan(project, start, List.of(new SetNullable("lists", "title", false),
+				new SetUnique("lists", "title", false), new SetUnique("lists", "owner", true)));
+		assertThat(plan.statements()).containsExactly(
+				"alter table \"p_0123456789ab\".\"lists\" alter column \"title\" set not null",
+				"alter table \"p_0123456789ab\".\"lists\" drop constraint \"lists_title_key\"",
+				"alter table \"p_0123456789ab\".\"lists\" add constraint \"lists_owner_key\" unique (\"owner\")");
+		ColumnDef title = plan.result().table("lists").orElseThrow().column("title").orElseThrow();
+		assertThat(title.nullable()).isFalse();
+		assertThat(title.unique()).isFalse();
+	}
+
+	@Test
+	void changesThatAreRefused() {
+		Catalog start = listsAndItems();
+		assertThatThrownBy(() -> planner.plan(project, start, List.of(new RenameTable("lists", "items"))))
+			.hasMessageContaining("already exists");
+		assertThatThrownBy(() -> planner.plan(project, start, List.of(new RenameTable("lists", "Lists\""))))
+			.isInstanceOf(ApiException.class);
+		assertThatThrownBy(() -> planner.plan(project, start, List.of(new RenameColumn("lists", "id", "key"))))
+			.hasMessageContaining("cannot be changed");
+		assertThatThrownBy(() -> planner.plan(project, start, List.of(new RenameColumn("lists", "title", "owner"))))
+			.hasMessageContaining("already has a column");
+		assertThatThrownBy(() -> planner.plan(project, start, List.of(new SetUnique("lists", "title", true))))
+			.hasMessageContaining("already unique");
+		assertThatThrownBy(() -> planner.plan(project, start, List.of(new SetNullable("lists", "title", null))))
+			.isInstanceOf(ApiException.class);
 	}
 
 	@Test
