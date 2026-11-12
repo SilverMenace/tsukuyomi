@@ -2,7 +2,9 @@ package dev.tsukuyomi.data;
 
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
+import dev.tsukuyomi.live.EventLog;
 import dev.tsukuyomi.query.CompiledSql;
 import dev.tsukuyomi.query.QueryLimits;
 import dev.tsukuyomi.query.QueryValidator;
@@ -15,6 +17,7 @@ import dev.tsukuyomi.tenancy.ProjectRef;
 import dev.tsukuyomi.tenancy.TenantIdentity;
 import dev.tsukuyomi.tenancy.TenantTransaction;
 
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 import org.springframework.dao.DataAccessException;
@@ -40,11 +43,14 @@ public class RowService {
 
 	private final ObjectMapper json;
 
+	private final EventLog changes;
+
 	private final QueryLimits limits = QueryLimits.DEFAULT;
 
 	private final QueryParser parser = new QueryParser(limits);
 
-	RowService(CatalogService catalogs, TenantTransaction tenant, ObjectMapper json) {
+	RowService(CatalogService catalogs, TenantTransaction tenant, ObjectMapper json, EventLog changes) {
+		this.changes = changes;
 		this.catalogs = catalogs;
 		this.tenant = tenant;
 		this.json = json;
@@ -59,6 +65,16 @@ public class RowService {
 		return run(identity, jdbc -> new Page(
 				jdbc.queryForObject(rows.sql(), String.class, rows.parameters().toArray()),
 				total == null ? null : jdbc.queryForObject(total.sql(), Long.class, total.parameters().toArray())));
+	}
+
+	/**
+	 * One row by id as the caller sees it, or null if it does not exist or the
+	 * caller's rules hide it. Live updates use this to decide who hears about a change.
+	 */
+	public JsonNode findById(TenantIdentity identity, String table, UUID id) {
+		Page page = select(identity, table, Map.of("id", List.of("eq." + id)), false);
+		JsonNode rows = json.readTree(page.json());
+		return rows.isEmpty() ? null : rows.get(0);
 	}
 
 	/** @return the inserted row (object body) or rows (array body) as JSON */
@@ -86,6 +102,7 @@ public class RowService {
 	}
 
 	private String execute(TenantIdentity identity, CompiledSql compiled) {
+		changes.markDirty(); // a write adds to the change log; let its clean-up know
 		return run(identity, jdbc -> jdbc.queryForObject(compiled.sql(), String.class, compiled.parameters().toArray()));
 	}
 

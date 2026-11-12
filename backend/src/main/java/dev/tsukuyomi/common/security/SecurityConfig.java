@@ -52,6 +52,9 @@ public class SecurityConfig {
 				.requestMatchers(HttpMethod.POST, "/platform/v1/accounts", "/platform/v1/session").permitAll()
 				.requestMatchers("/platform/v1/**").hasAuthority(SessionAuthFilter.ROLE)
 				.requestMatchers("/api/v1/**", "/auth/v1/**").hasAuthority(ApiKeyFilter.ROLE)
+				// The WebSocket handshake is open; the connection authenticates itself
+				// with its first message (see LiveSocketHandler).
+				.requestMatchers(HttpMethod.GET, "/realtime/v1").permitAll()
 				.anyRequest().denyAll());
 		return http.build();
 	}
