@@ -1,0 +1,15 @@
+{
+  "name": "tsukuyomi-js",
+  "version": "0.1.0",
+  "description": "Client for a Tsukuyomi project: queries, end-user auth and live updates. No dependencies.",
+  "type": "module",
+  "private": true,
+  "exports": "./src/index.ts",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.0"
+  }
+}
