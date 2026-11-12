@@ -20,6 +20,7 @@ export default function ApiPage({ project }: { project: Project }) {
   })
 
   const url = `${window.location.origin}/api/v1`
+  const authUrl = `${window.location.origin}/auth/v1`
   const table = schema.data?.tables[0]?.name ?? 'your_table'
 
   return (
@@ -53,7 +54,36 @@ export default function ApiPage({ project }: { project: Project }) {
       </div>
 
       <div className="card stack">
+        <h2>End-user auth</h2>
+        <p className="muted small">
+          Apps built on this project sign their own users up here. These calls use the anon key
+          (<code>apikey</code> header). A request that also sends the user's access token runs as
+          that user, so the table's rules decide what it sees. Tokens last an hour; refresh to get
+          a new pair (the old refresh token then stops working).
+        </p>
+        <pre>{`# sign up (login takes the same body and returns the same JSON)
+curl -X POST "${authUrl}/signup" \\
+  -H "apikey: <your anon key>" -H "Content-Type: application/json" \\
+  -d '{"email": "ada@example.com", "password": "a long password"}'
+
+# log in
+curl -X POST "${authUrl}/login" \\
+  -H "apikey: <your anon key>" -H "Content-Type: application/json" \\
+  -d '{"email": "ada@example.com", "password": "a long password"}'
+
+# read rows as that user
+curl "${url}/${table}" \\
+  -H "apikey: <your anon key>" -H "Authorization: Bearer <access_token>"
+
+# get a new token pair
+curl -X POST "${authUrl}/refresh" \\
+  -H "apikey: <your anon key>" -H "Content-Type: application/json" \\
+  -d '{"refresh_token": "<refresh_token>"}'`}</pre>
+      </div>
+
+      <div className="card stack">
         <h2>Try it</h2>
+        <p className="muted small">With the service key, which bypasses all rules.</p>
         <pre>{`# list rows
 curl "${url}/${table}?limit=20" -H "apikey: <your service key>"
 

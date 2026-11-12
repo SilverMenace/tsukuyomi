@@ -27,7 +27,7 @@ export default function DataPage({ projectId }: { projectId: string }) {
     <div className="stack">
       <nav className="pills">
         {schema.data.tables.map((t) => (
-          <NavLink key={t.name} to={`../data/${t.name}`} className={t.name === table.name ? 'active' : ''}>
+          <NavLink key={t.name} to={`/projects/${projectId}/data/${t.name}`} className={t.name === table.name ? 'active' : ''}>
             {t.name}
           </NavLink>
         ))}

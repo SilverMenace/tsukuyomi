@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 import { api, COLUMN_TYPES, errorMessage } from '../api.ts'
 import type { ColumnSpec, ColumnType, OnDelete, Operation, Table } from '../api.ts'
 
@@ -66,6 +66,7 @@ export default function TablesPage({ projectId }: { projectId: string }) {
 type Run = (operations: Operation[], dryRun?: boolean) => void
 
 function TableCard({ table, tables, run, busy }: { table: Table; tables: string[]; run: Run; busy: boolean }) {
+  const { projectId = '' } = useParams()
   const [column, setColumn] = useState<ColumnSpec>(emptyColumn())
 
   function addColumn(dryRun: boolean) {
@@ -78,14 +79,18 @@ function TableCard({ table, tables, run, busy }: { table: Table; tables: string[
   return (
     <div className="card stack">
       <div className="row">
-        <h2 className="grow">{table.name}</h2>
-        <Link to={`../data/${table.name}`}>Browse rows</Link>
-        <button
-          className="danger" disabled={busy}
-          onClick={() => window.confirm(`Delete table "${table.name}" and all its rows?`) && run([{ op: 'drop_table', table: table.name }])}
-        >
-          Delete table
-        </button>
+        <h2>{table.name}</h2>
+        {table.builtin && <span className="muted">(built in)</span>}
+        <span className="grow" />
+        <Link to={`/projects/${projectId}/data/${table.name}`}>Browse rows</Link>
+        {!table.builtin && (
+          <button
+            className="danger" disabled={busy}
+            onClick={() => window.confirm(`Delete table "${table.name}" and all its rows?`) && run([{ op: 'drop_table', table: table.name }])}
+          >
+            Delete table
+          </button>
+        )}
       </div>
       <table>
         <thead>
@@ -116,7 +121,7 @@ function TableCard({ table, tables, run, busy }: { table: Table; tables: string[
         </tbody>
       </table>
       <div className="row">
-        <ColumnInputs column={column} tables={tables} onChange={setColumn} />
+        <ColumnInputs column={column} tables={tables} onChange={setColumn} forceOptional={table.builtin} />
         <button disabled={busy || !column.name} onClick={() => addColumn(true)}>Preview SQL</button>
         <button disabled={busy || !column.name} onClick={() => addColumn(false)}>Add column</button>
       </div>
@@ -170,7 +175,14 @@ function NewTableForm({ tables, run, busy }: { tables: string[]; run: Run; busy:
 
 const ON_DELETE_LABELS: Record<OnDelete, string> = { restrict: 'restrict', cascade: 'cascade', set_null: 'set null' }
 
-function ColumnInputs({ column, tables, onChange }: { column: ColumnSpec; tables: string[]; onChange: (c: ColumnSpec) => void }) {
+type ColumnInputsProps = {
+  column: ColumnSpec
+  tables: string[]
+  onChange: (c: ColumnSpec) => void
+  forceOptional?: boolean // columns added to the built-in users table must be nullable
+}
+
+function ColumnInputs({ column, tables, onChange, forceOptional = false }: ColumnInputsProps) {
   // A foreign key must be a uuid (it points at the other table's id), so choosing one forces the type
   function setReference(table: string) {
     if (table === '') {
@@ -209,7 +221,7 @@ function ColumnInputs({ column, tables, onChange }: { column: ColumnSpec; tables
       )}
       <label className="check">
         <input
-          type="checkbox" checked={!column.nullable}
+          type="checkbox" checked={!column.nullable && !forceOptional} disabled={forceOptional}
           onChange={(e) => onChange({ ...column, nullable: !e.target.checked })}
         />
         required

@@ -32,7 +32,19 @@ export type Column = {
   references: string | null
   onDelete: OnDelete | null
 }
-export type Table = { name: string; columns: Column[] }
+
+// Who may do an operation on a table's rows. A missing operation means 'nobody'
+// (only the service key), so the catalog only lists the three open kinds.
+export type RuleOperation = 'select' | 'insert' | 'update' | 'delete'
+export type RuleKind = 'nobody' | 'anyone' | 'authenticated' | 'owner'
+export type Rule = { kind: Exclude<RuleKind, 'nobody'>; ownerColumn: string | null }
+
+export type Table = {
+  name: string
+  columns: Column[]
+  builtin: boolean // true for the platform-made users table
+  rules: Partial<Record<RuleOperation, Rule>>
+}
 export type Catalog = { version: number; tables: Table[] }
 
 export type ColumnSpec = {
@@ -51,10 +63,12 @@ export type Operation =
   | { op: 'drop_table'; table: string }
   | { op: 'add_column'; table: string; column: ColumnSpec }
   | { op: 'drop_column'; table: string; column: string }
+  | { op: 'set_rule'; table: string; operation: RuleOperation; rule: RuleKind; ownerColumn?: string }
 
 export type MigrationResult = { version: number; sql: string; applied: boolean }
 export type MigrationRecord = { version: number; operations: string; sql: string; appliedAt: string }
 export type ApiKeyInfo = { kind: 'anon' | 'service'; prefix: string; createdAt: string }
+export type EndUser = { id: string; email: string; createdAt: string }
 export type Row = Record<string, unknown>
 export type RowFilter = { column: string; op: string; value: string }
 export type RowsOptions = { limit: number; offset: number; order?: string; filter?: RowFilter }
@@ -125,6 +139,8 @@ export const api = {
   migrate: (id: string, operations: Operation[], dryRun: boolean) =>
     request<MigrationResult>('POST', `${base}/projects/${id}/migrations?dryRun=${dryRun}`, { operations }),
   migrations: (id: string) => request<MigrationRecord[]>('GET', `${base}/projects/${id}/migrations`),
+
+  endUsers: (id: string) => request<EndUser[]>('GET', `${base}/projects/${id}/users`),
 
   rows: async (id: string, table: string, options: RowsOptions): Promise<RowsPage> => {
     const query = new URLSearchParams({ limit: String(options.limit), offset: String(options.offset) })
