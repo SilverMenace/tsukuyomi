@@ -65,19 +65,30 @@ sequenceDiagram
     participant C as Client app
     participant K as ApiKeyFilter
     participant DC as DataController
+    participant RE as RowEndpoints
     participant RS as RowService
+    participant QP as QueryParser
+    participant QV as QueryValidator
+    participant SB as SqlBuilder
     participant TT as TenantTransaction
     participant P as PostgreSQL (tsk_api)
 
-    C->>K: GET /api/v1/notes + apikey header
+    C->>K: GET /api/v1/posts?select=title,authors(name)&priority=gte.2 + apikey header
     K->>P: key hash -> project + role (owner pool)
     K->>DC: request now carries a TenantIdentity
-    DC->>RS: list(identity, "notes", limit, offset)
-    RS->>RS: look "notes" up in the catalog (404 if absent), build SQL from catalog names
+    DC->>RE: select(identity, "posts", request)
+    RE->>RS: select(identity, "posts", query parameters, count?)
+    RS->>QP: parse(parameters)
+    QP-->>RS: RawQuery (plain text in a structure, nothing checked yet)
+    RS->>QV: select("posts", RawQuery)
+    QV->>QV: look every table and column name up in the catalog (404 / 400 if absent)
+    QV-->>RS: SelectQuery (holds catalog objects; request values wrapped in Param)
+    RS->>SB: select(project, limits, SelectQuery)
+    SB-->>RS: CompiledSql (SQL text with ? placeholders + bind list)
     RS->>TT: execute(identity, work)
     TT->>P: BEGIN
     TT->>P: SET LOCAL ROLE p_x_service, search_path, statement_timeout, tsk.user_id
-    TT->>P: SELECT json_agg(...) with bind parameters
+    TT->>P: the compiled statement, with bind parameters
     Note over P: table grants + row-level security decide what is visible
     TT->>P: COMMIT (role and settings vanish)
     TT-->>C: JSON text straight from Postgres
@@ -85,8 +96,45 @@ sequenceDiagram
 
 The dashboard's data browser takes the same path from `RowService` onwards, as the service role.
 
+### The three compiler stages
+
+| Stage | Input -> output | Responsible for | Must never |
+|---|---|---|---|
+| `QueryParser` | query string -> `RawQuery` (text in a structure) | The shape of the request: `select` grammar, `column=op.value` filters, `order`, `limit`, `offset`. Size limits. | Know which tables or columns exist, or trust any text it reads. |
+| `QueryValidator` | `RawQuery` -> `SelectQuery` / `WriteCommand` (trusted AST) | The trust boundary. Looks each name up in the catalog and keeps the catalog's object. Checks operators against column types, relations, and `QueryLimits`. | Let a request string into the AST as a name. Request text survives only as a `Param` value. |
+| `SqlBuilder` | AST -> `CompiledSql` (SQL + bind list) | Writing SQL: keywords are literals in the class, identifiers are quoted catalog names, every value becomes `?`. | Accept a `String` from a caller, or put a `Param` value into the SQL text. |
+
+Worked example. The request below uses the test blog schema, where `posts` has two columns that
+reference `authors`, so the column is named with `!`:
+
+```
+GET /api/v1/posts?select=title,authors!author_id(name)&priority=gte.2&order=title&limit=5
+```
+
+`SqlBuilder` compiles it to this statement for project schema `p_0123456789ab` (line breaks added
+here for reading; the real text is one line):
+
+```sql
+select coalesce(json_agg(row_to_json(r)), '[]'::json)::text from (
+  select t0."title",
+    (select row_to_json(e1) from (
+      select t1."name" from "p_0123456789ab"."authors" as t1
+      where t1."id" = t0."author_id") e1) as "authors"
+  from "p_0123456789ab"."posts" as t0
+  where t0."priority" >= cast(? as integer)
+  order by t0."title", t0."id"
+  limit ? offset ?) r
+```
+
+Bind parameters, in the order of the `?` placeholders: `"2"`, `5`, `0`. The first is the filter
+value. It comes from the request, is sent as the text `"2"` and is cast by Postgres to `integer`.
+The other two are `limit` and `offset` as integers; `offset` defaulted to 0.
+
+Things to notice: the table aliases are `t0` (posts) and `t1` (authors), and `e1` names the inner
+row; `id` is appended to `order by` so the order is total; the author comes back as a nested JSON
+object because Postgres builds it in the sub-select.
+
 ## Coming next
 
-- M2: the query compiler replaces the simple SQL building in `RowService`.
 - M3: end-user tokens add a `USER` identity; rules become row-level security policies.
 - M4: live-update subscription (trigger → outbox → NOTIFY → listener → WebSocket).

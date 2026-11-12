@@ -278,3 +278,7 @@ Newest milestones are at the bottom. Each entry is written so you can answer
 - **Choice:** `QueryLimits` caps page size (100), offset, number of filters (20), `in` list (100),
   value length, expansion depth and batch size; `TenantTransaction` adds a 3-second statement timeout.
 - **Why:** on shared infrastructure, one tenant's expensive request is every tenant's slow request.
+- **A total row budget, not only per-level caps:** each list expansion can multiply its parent's
+  rows by 100, so three levels could be 100 x 100 x 100 = one million rows from one URL. The
+  validator adds up the worst case across all levels and refuses anything over 25,000 before it
+  runs. (This gap was caught by an automated security review of the first version.)
