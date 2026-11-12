@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { api, errorMessage } from '../api.ts'
 import type { Project } from '../api.ts'
+import LiveTester from './LiveTester.tsx'
 import Secret from './Secret.tsx'
 
 /** API URL, keys and a copy-paste example. */
@@ -21,6 +22,7 @@ export default function ApiPage({ project }: { project: Project }) {
 
   const url = `${window.location.origin}/api/v1`
   const authUrl = `${window.location.origin}/auth/v1`
+  const liveUrl = `${window.location.origin.replace(/^http/, 'ws')}/realtime/v1`
   const table = schema.data?.tables[0]?.name ?? 'your_table'
 
   return (
@@ -79,6 +81,24 @@ curl "${url}/${table}" \\
 curl -X POST "${authUrl}/refresh" \\
   -H "apikey: <your anon key>" -H "Content-Type: application/json" \\
   -d '{"refresh_token": "<refresh_token>"}'`}</pre>
+      </div>
+
+      <div className="card stack">
+        <h2>Live updates</h2>
+        <p className="muted small">
+          Apps open a WebSocket and are told when rows change. A connection hears about a row
+          only if it could also read it, so the anon key sees nothing on a table whose read rule
+          is "nobody" or "owner". Try it: watch a table here, then add or edit a row in the Data tab
+          (another browser tab works best).
+        </p>
+        <LiveTester tables={schema.data?.tables.map((t) => t.name) ?? []} key={schema.data?.tables.length ?? 0} />
+        <pre>{`const ws = new WebSocket('${liveUrl}')
+ws.onopen = () => ws.send(JSON.stringify({ type: 'auth', apikey: '<your anon key>', token: '<access_token, optional>' }))
+ws.onmessage = (m) => {
+  const msg = JSON.parse(m.data)
+  if (msg.type === 'ready') ws.send(JSON.stringify({ type: 'subscribe', table: '${table}' }))
+  if (msg.type === 'event') console.log(msg.op, msg.id, msg.row)
+}`}</pre>
       </div>
 
       <div className="card stack">

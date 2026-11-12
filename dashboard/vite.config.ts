@@ -10,6 +10,8 @@ export default defineConfig({
     proxy: {
       '/platform': 'http://localhost:8080',
       '/api': 'http://localhost:8080',
+      '/auth': 'http://localhost:8080',
+      '/realtime': { target: 'http://localhost:8080', ws: true },
     },
   },
 })
