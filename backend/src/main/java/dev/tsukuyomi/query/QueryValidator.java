@@ -68,8 +68,32 @@ public final class QueryValidator {
 		if (offset < 0 || offset > limits.maxOffset()) {
 			throw invalid("offset must be between 0 and " + limits.maxOffset());
 		}
-		return new SelectQuery(table, items(table, raw.select(), 0), filters(table, raw.filters()),
-				order(table, raw.order()), limit, offset);
+		List<SelectItem> items = items(table, raw.select(), 0);
+		long worstCase = worstCaseRows(items, limit);
+		if (worstCase > limits.maxTotalRows()) {
+			throw invalid("this query could return up to " + worstCase + " rows (max " + limits.maxTotalRows()
+					+ "); lower the limit or remove a nested list");
+		}
+		return new SelectQuery(table, items, filters(table, raw.filters()), order(table, raw.order()), limit, offset);
+	}
+
+	/**
+	 * The most rows this query could make Postgres produce, counting nested
+	 * rows. Each to-many expansion can multiply its parent's row count by
+	 * maxEmbedRows, so caps per level are not enough: 100 parents x 100 children
+	 * x 100 grandchildren is a million rows from one URL. This adds the levels
+	 * up so the request can be refused before it runs.
+	 */
+	private long worstCaseRows(List<SelectItem> items, long parentRows) {
+		long total = parentRows;
+		for (SelectItem item : items) {
+			if (item instanceof SelectItem.Embed embed) {
+				long rows = embed.relation().kind() == Relation.Kind.TO_MANY ? parentRows * limits.maxEmbedRows()
+						: parentRows;
+				total += worstCaseRows(embed.items(), rows);
+			}
+		}
+		return total;
 	}
 
 	private List<SelectItem> items(TableDef table, List<RawSelectItem> raw, int depth) {

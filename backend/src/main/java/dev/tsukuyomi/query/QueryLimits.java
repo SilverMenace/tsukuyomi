@@ -7,9 +7,9 @@ package dev.tsukuyomi.query;
  */
 public record QueryLimits(int defaultLimit, int maxLimit, int maxOffset, int maxFilters, int maxInValues,
 		int maxValueLength, int maxOrderTerms, int maxEmbedDepth, int maxEmbedRows, int maxSelectLength,
-		int maxBatchRows) {
+		int maxBatchRows, long maxTotalRows) {
 
 	public static final QueryLimits DEFAULT = new QueryLimits(20, 100, 100_000, 20, 100, 2_000, 5, 2, 100, 2_000,
-			100);
+			100, 25_000);
 
 }

@@ -76,8 +76,22 @@ class SqlBuilderTest {
 
 	@Test
 	void expansionsNestTwoLevels() {
-		String sql = select("authors", params("select", "name,posts!author_id(title,comments(body))")).sql();
+		String sql = select("authors", params("select", "name,posts!author_id(title,comments(body))", "limit", "1")).sql();
 		assertThat(sql).contains("as t1 where t1.\"author_id\" = t0.\"id\"").contains("as t2 where t2.\"post_id\" = t1.\"id\"");
+	}
+
+	@Test
+	void totalRowBudgetStopsMultiplyingExpansions() {
+		// 20 authors x 100 posts x 100 comments = 200,000 nested rows: refused
+		assertThatThrownBy(() -> select("authors", params("select", "name,posts!author_id(title,comments(body))")))
+			.hasMessageContaining("could return up to 202020 rows");
+		// the same shape for two authors fits (2 + 200 + 20,000), for three it does not
+		assertThat(select("authors", params("select", "name,posts!author_id(title,comments(body))", "limit", "2"))).isNotNull();
+		assertThatThrownBy(() -> select("authors", params("select", "name,posts!author_id(title,comments(body))", "limit", "3")))
+			.hasMessageContaining("30303");
+		// to-one expansions do not multiply, and one to-many level at the default page size is fine
+		assertThat(select("comments", params("select", "body,posts(title,authors!author_id(name))", "limit", "100"))).isNotNull();
+		assertThat(select("posts", params("select", "title,comments(body)", "limit", "99"))).isNotNull();
 	}
 
 	@Test

@@ -145,9 +145,12 @@ class QueryApiTest {
 		assertThat(draft.get("comments").size()).isZero();
 
 		// two levels: author -> posts -> comments
-		JsonNode ada = api.get("/api/v1/authors?select=name,posts(title,comments(body))&name=eq.Ada").json().get(0);
+		JsonNode ada = api.get("/api/v1/authors?select=name,posts(title,comments(body))&name=eq.Ada&limit=1").json().get(0);
 		assertThat(ada.get("posts").size()).isEqualTo(2);
 		assertThat(ada.get("posts").get(0).get("comments").size()).isEqualTo(2);
+
+		// without a small limit the same request could fan out too far, and is refused
+		assertThat(api.get("/api/v1/authors?select=name,posts(title,comments(body))").status()).isEqualTo(400);
 	}
 
 	@Test
