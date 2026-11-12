@@ -1,5 +1,7 @@
 package dev.tsukuyomi.common.limit;
 
+import java.util.Collections;
+
 import jakarta.servlet.http.HttpServletRequest;
 
 import org.springframework.beans.factory.annotation.Value;
@@ -30,7 +32,11 @@ public class ClientAddress {
 	}
 
 	public String of(HttpServletRequest request) {
-		return resolve(request.getHeader("X-Forwarded-For"), request.getRemoteAddr());
+		// A request can carry the header several times. HTTP says that equals one
+		// header with the values joined by commas, so join them before counting;
+		// reading only the first line would let a client put its own line first.
+		String forwardedFor = String.join(",", Collections.list(request.getHeaders("X-Forwarded-For")));
+		return resolve(forwardedFor.isEmpty() ? null : forwardedFor, request.getRemoteAddr());
 	}
 
 	/** @param forwardedFor the X-Forwarded-For header, or null */

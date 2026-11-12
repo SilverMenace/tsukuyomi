@@ -139,6 +139,98 @@ class LimitsTest {
 		assertThat(service.post("/api/v1/things", "{\"n\":6}").status()).isEqualTo(201);
 	}
 
+	/** The path is compared after decoding, the way the router sees it. */
+	@Test
+	void anEncodedPathDoesNotSlipPastTheCredentialLimit() {
+		TestClient attacker = new TestClient(port).withApiKey(anonKey).from("203.0.113.60");
+		String guess = "{\"email\":\"victim@example.com\",\"password\":\"guess number one\"}";
+		int refused = 0;
+		for (int i = 0; i < 8; i++) {
+			// "%67" is "g": Spring routes this to the login handler.
+			int status = attacker.post("/auth/v1/lo%67in", guess).status();
+			assertThat(status).isIn(401, 429);
+			refused += status == 429 ? 1 : 0;
+		}
+		assertThat(refused).isEqualTo(4);
+	}
+
+	/** A second header line added by the client must not replace what the proxy wrote. */
+	@Test
+	void aSecondForwardedHeaderLineIsCountedToo() throws Exception {
+		java.net.http.HttpClient http = java.net.http.HttpClient.newHttpClient();
+		int refused = 0;
+		for (int i = 0; i < 8; i++) {
+			java.net.http.HttpRequest request = java.net.http.HttpRequest
+				.newBuilder(java.net.URI.create("http://localhost:" + port + "/auth/v1/login"))
+				.header("X-Forwarded-For", "10.7.7." + i) // the client's own line, different every time
+				.header("X-Forwarded-For", "203.0.113.70") // the line the proxy appends
+				.header("apikey", anonKey)
+				.header("Content-Type", "application/json")
+				.POST(java.net.http.HttpRequest.BodyPublishers
+					.ofString("{\"email\":\"victim@example.com\",\"password\":\"guess number one\"}"))
+				.build();
+			refused += http.send(request, java.net.http.HttpResponse.BodyHandlers.discarding()).statusCode() == 429 ? 1
+					: 0;
+		}
+		assertThat(refused).isEqualTo(4);
+	}
+
+	/** Ten inserts at once into a table with room for two: exactly two succeed. */
+	@Test
+	void theRowQuotaHoldsUnderConcurrentInserts() throws Exception {
+		TestClient dashboard = new TestClient(port).from("198.51.100.2");
+		dashboard.signup("owner-" + UUID.randomUUID() + "@example.com");
+		JsonNode created = dashboard.post("/platform/v1/projects", "{\"name\":\"race\"}").json();
+		dashboard.post("/platform/v1/projects/" + created.get("project").get("id").asString() + "/migrations",
+				"{\"operations\":[{\"op\":\"create_table\",\"table\":\"things\",\"columns\":[{\"name\":\"n\",\"type\":\"integer\"}]}]}");
+		String key = created.get("serviceKey").asString();
+		TestClient filler = new TestClient(port).withApiKey(key).from("203.0.113.80");
+		assertThat(filler.post("/api/v1/things", "[{\"n\":1},{\"n\":2},{\"n\":3}]").status()).isEqualTo(201);
+
+		java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+		java.util.concurrent.atomic.AtomicInteger inserted = new java.util.concurrent.atomic.AtomicInteger();
+		java.util.List<Thread> threads = new java.util.ArrayList<>();
+		for (int i = 0; i < 10; i++) {
+			TestClient writer = new TestClient(port).withApiKey(key).from("203.0.113." + (90 + i));
+			threads.add(Thread.ofVirtual().start(() -> {
+				try {
+					start.await();
+				}
+				catch (InterruptedException e) {
+					return;
+				}
+				if (writer.post("/api/v1/things", "{\"n\":9}").status() == 201) {
+					inserted.incrementAndGet();
+				}
+			}));
+		}
+		start.countDown();
+		for (Thread thread : threads) {
+			thread.join();
+		}
+		assertThat(inserted.get()).isEqualTo(2);
+		assertThat(filler.get("/api/v1/things?select=n").json()).hasSize(5);
+	}
+
+	/** No Content-Length to check: the limit must hold on what is actually read. */
+	@Test
+	void anOversizedBodyWithoutADeclaredLengthIsRefused() throws Exception {
+		java.net.http.HttpRequest request = java.net.http.HttpRequest
+			.newBuilder(java.net.URI.create("http://localhost:" + port + "/api/v1/things"))
+			.header("X-Forwarded-For", "203.0.113.51")
+			.header("apikey", serviceKey)
+			.header("Content-Type", "application/json")
+			// A stream of unknown length makes the client send the body in chunks.
+			.POST(java.net.http.HttpRequest.BodyPublishers.ofInputStream(() -> new java.io.ByteArrayInputStream(
+					("{\"n\":1," + " ".repeat(5000) + "\"x\":1}").getBytes(java.nio.charset.StandardCharsets.UTF_8))))
+			.build();
+		int status = java.net.http.HttpClient.newBuilder().version(java.net.http.HttpClient.Version.HTTP_1_1).build()
+			.send(request, java.net.http.HttpResponse.BodyHandlers.discarding()).statusCode();
+		assertThat(status).isEqualTo(400);
+		assertThat(new TestClient(port).withApiKey(serviceKey).from("203.0.113.52").get("/api/v1/things?n=eq.1&select=n")
+			.status()).isEqualTo(200);
+	}
+
 	@Test
 	void anOversizedBodyIsRefusedBeforeItIsRead() {
 		TestClient service = new TestClient(port).withApiKey(serviceKey).from("203.0.113.50");

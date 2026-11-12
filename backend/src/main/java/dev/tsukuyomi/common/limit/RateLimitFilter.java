@@ -22,6 +22,7 @@ import org.springframework.http.MediaType;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
+import org.springframework.web.util.UrlPathHelper;
 
 /**
  * Refuses callers that send too much, before any other work is done for them
@@ -80,9 +81,19 @@ public class RateLimitFilter extends OncePerRequestFilter {
 		this.maxBodyBytes = maxBodyBytes;
 	}
 
+	/**
+	 * The path as the router will see it: percent-decoded, without ";params".
+	 * The raw request URI must not be used for decisions here. "/auth/v1/lo%67in"
+	 * is not equal to "/auth/v1/login" as text, but Spring decodes it and routes
+	 * it to the login handler, so a check on the raw text could be walked around.
+	 */
+	private static String path(HttpServletRequest request) {
+		return UrlPathHelper.defaultInstance.getPathWithinApplication(request);
+	}
+
 	@Override
 	protected boolean shouldNotFilter(HttpServletRequest request) {
-		String path = request.getRequestURI();
+		String path = path(request);
 		boolean counted = path.startsWith("/api/") || path.startsWith("/auth/") || path.startsWith("/platform/")
 				|| path.startsWith("/realtime/");
 		// A browser's CORS preflight (OPTIONS) carries no key and does no work.
@@ -96,9 +107,12 @@ public class RateLimitFilter extends OncePerRequestFilter {
 			refuse(request, response, 413, "too_large", "the request body is larger than " + maxBodyBytes + " bytes", 0);
 			return;
 		}
+		// A body can also arrive in chunks with no declared length, so the
+		// declared length alone proves nothing: count what is actually read.
+		request = new LimitedBodyRequest(request, maxBodyBytes);
 		String address = addresses.of(request);
 		double wait = 0;
-		if ("POST".equals(request.getMethod()) && CREDENTIAL_PATHS.contains(request.getRequestURI())) {
+		if ("POST".equals(request.getMethod()) && CREDENTIAL_PATHS.contains(path(request))) {
 			wait = limiter.tryAcquire("credentials:" + address, credentials);
 		}
 		if (wait == 0) {
@@ -129,7 +143,7 @@ public class RateLimitFilter extends OncePerRequestFilter {
 		if (retryAfterSeconds > 0) {
 			response.setHeader("Retry-After", Long.toString(retryAfterSeconds));
 		}
-		String path = request.getRequestURI();
+		String path = path(request);
 		if (path.startsWith("/api/") || path.startsWith("/auth/")) {
 			// This filter runs before the CORS filter. Without this header a
 			// browser app on another site would see a network error, not our message.
