@@ -7,6 +7,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 import dev.tsukuyomi.data.IdentityResolver;
+import dev.tsukuyomi.platform.ProjectAccessChanged;
 import dev.tsukuyomi.schema.CatalogService;
 import dev.tsukuyomi.tenancy.TenantIdentity;
 
@@ -15,6 +16,7 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 import org.springframework.beans.factory.DisposableBean;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
@@ -175,6 +177,23 @@ class LiveSocketHandler extends TextWebSocketHandler implements DisposableBean {
 			}
 		}
 		hub.subscribe(client, table, since);
+	}
+
+	/**
+	 * A key was replaced or the project deleted. A WebSocket is checked only
+	 * once, when it authenticates, so connections opened with the old
+	 * credentials would otherwise keep receiving rows for ever. Close them all;
+	 * clients with a key that is still good simply reconnect.
+	 */
+	@EventListener
+	void onAccessChanged(ProjectAccessChanged change) {
+		for (LiveClient client : clients.values()) {
+			TenantIdentity identity = client.identity();
+			if (identity != null && identity.project().id().equals(change.projectId())) {
+				client.error("access_changed", "this project's keys changed; connect again");
+				client.close(LiveClient.UNAUTHORIZED);
+			}
+		}
 	}
 
 	@Override

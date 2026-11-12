@@ -146,15 +146,17 @@ class LiveUpdatesTest {
 			assertThat(update.get("row").get("title").asString()).isEqualTo("edited");
 			assertEvent(serviceLive.next(), "update", "notes", id);
 
-			// Bob and the anonymous visitor are subscribed to the same table and heard nothing.
-			assertThat(bobLive.next(700)).isNull();
-			assertThat(anonLive.next(100)).isNull();
-
 			// A delete carries the id and no row.
 			alice.delete("/api/v1/notes?id=eq." + id);
 			JsonNode delete = aliceLive.next();
 			assertEvent(delete, "delete", "notes", id);
 			assertThat(delete.get("row").isNull()).isTrue();
+			assertEvent(serviceLive.next(), "delete", "notes", id);
+
+			// Bob and the anonymous visitor are subscribed to the same table and heard
+			// nothing at all: not the insert, not the update, and not even the delete.
+			assertThat(bobLive.next(700)).isNull();
+			assertThat(anonLive.next(100)).isNull();
 		}
 	}
 
@@ -167,6 +169,9 @@ class LiveUpdatesTest {
 			String id = service.post("/api/v1/posts", "{\"body\":\"hello\"}").json().get("id").asString();
 			assertEvent(anonLive.next(), "insert", "posts", id);
 			assertEvent(bobLive.next(), "insert", "posts", id);
+			service.delete("/api/v1/posts?id=eq." + id);
+			assertEvent(anonLive.next(), "delete", "posts", id);
+			assertEvent(bobLive.next(), "delete", "posts", id);
 		}
 	}
 
@@ -224,6 +229,27 @@ class LiveUpdatesTest {
 			assertThat(client.subscribe("posts", "not-a-number").get("code").asString()).isEqualTo("bad_message");
 			assertThat(client.subscribe("posts", null).get("type").asString()).isEqualTo("subscribed");
 			assertThat(client.subscribe("posts", null).get("code").asString()).isEqualTo("already_subscribed");
+		}
+	}
+
+	/**
+	 * A WebSocket proves who it is once, when it connects. So replacing a key
+	 * must also end the connections that were let in with the old one.
+	 */
+	@Test
+	void replacingAKeyClosesConnectionsOpenedWithTheOldOne() throws InterruptedException {
+		TestClient dashboard = new TestClient(port);
+		dashboard.signup(email("rotating-owner"));
+		JsonNode created = dashboard.post("/platform/v1/projects", "{\"name\":\"rotate\"}").json();
+		String base = "/platform/v1/projects/" + created.get("project").get("id").asString();
+		try (LiveTestClient live = LiveTestClient.connect(port, created.get("serviceKey").asString(), null)) {
+			assertThat(live.subscribe("users", null).get("type").asString()).isEqualTo("subscribed");
+			assertThat(dashboard.post(base + "/keys/service/rotate", "{}").status()).isEqualTo(200);
+			assertThat(live.next().get("code").asString()).isEqualTo("access_changed");
+			for (int i = 0; i < 50 && live.closeCode() < 0; i++) {
+				Thread.sleep(100);
+			}
+			assertThat(live.closeCode()).isEqualTo(4401);
 		}
 	}
 

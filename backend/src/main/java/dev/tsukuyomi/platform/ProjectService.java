@@ -13,6 +13,7 @@ import dev.tsukuyomi.tenancy.TenantRole;
 import dev.tsukuyomi.tenancy.TenantTransaction;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -27,6 +28,8 @@ public class ProjectService {
 
 	private final ProjectRepository projects;
 
+	private final ApplicationEventPublisher access;
+
 	private final CatalogRepository catalogs;
 
 	private final JdbcTemplate jdbc;
@@ -36,9 +39,10 @@ public class ProjectService {
 	private final int maxProjects;
 
 	ProjectService(ProjectRepository projects, CatalogRepository catalogs, JdbcTemplate jdbc,
-			TransactionTemplate transaction,
+			TransactionTemplate transaction, ApplicationEventPublisher access,
 			@Value("${tsukuyomi.quota.projects-per-account:3}") int maxProjects) {
 		this.projects = projects;
+		this.access = access;
 		this.catalogs = catalogs;
 		this.jdbc = jdbc;
 		this.transaction = transaction;
@@ -101,7 +105,9 @@ public class ProjectService {
 			case "service" -> TenantRole.SERVICE;
 			default -> throw ApiException.badRequest("invalid_kind", "kind must be anon or service");
 		};
-		return newKey(project.id(), role);
+		String key = newKey(project.id(), role);
+		access.publishEvent(new ProjectAccessChanged(project.id()));
+		return key;
 	}
 
 	public void delete(Account account, UUID projectId) {
@@ -114,6 +120,7 @@ public class ProjectService {
 			}
 			projects.delete(ref.id());
 		});
+		access.publishEvent(new ProjectAccessChanged(ref.id())); // after the commit
 	}
 
 	private String newKey(UUID projectId, TenantRole role) {
