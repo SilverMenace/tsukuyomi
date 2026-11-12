@@ -32,6 +32,19 @@ public record TableDef(String name, List<ColumnDef> columns, Map<RuleOperation, 
 		return rules.getOrDefault(operation, Rule.NOBODY);
 	}
 
+	TableDef withName(String name) {
+		return new TableDef(name, columns, rules, builtin);
+	}
+
+	/** Replaces one column, keeping its position. */
+	TableDef withColumn(String oldName, ColumnDef replacement) {
+		return withColumns(columns.stream().map(c -> c.name().equals(oldName) ? replacement : c).toList());
+	}
+
+	TableDef withRules(Map<RuleOperation, Rule> rules) {
+		return new TableDef(name, columns, rules, builtin);
+	}
+
 	TableDef withColumns(List<ColumnDef> columns) {
 		return new TableDef(name, columns, rules, builtin);
 	}

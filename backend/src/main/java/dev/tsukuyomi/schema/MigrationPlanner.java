@@ -1,6 +1,8 @@
 package dev.tsukuyomi.schema;
 
 import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.Map;
 import java.util.List;
 
 import dev.tsukuyomi.common.ApiException;
@@ -9,6 +11,10 @@ import dev.tsukuyomi.schema.SchemaOperation.ColumnSpec;
 import dev.tsukuyomi.schema.SchemaOperation.CreateTable;
 import dev.tsukuyomi.schema.SchemaOperation.DropColumn;
 import dev.tsukuyomi.schema.SchemaOperation.DropTable;
+import dev.tsukuyomi.schema.SchemaOperation.RenameColumn;
+import dev.tsukuyomi.schema.SchemaOperation.RenameTable;
+import dev.tsukuyomi.schema.SchemaOperation.SetNullable;
+import dev.tsukuyomi.schema.SchemaOperation.SetUnique;
 import dev.tsukuyomi.schema.SchemaOperation.SetRule;
 import dev.tsukuyomi.tenancy.ProjectRef;
 import dev.tsukuyomi.tenancy.TenantRole;
@@ -62,6 +68,10 @@ public final class MigrationPlanner {
 				case DropTable op -> dropTable(project, catalog, op, statements);
 				case AddColumn op -> addColumn(project, catalog, op, statements);
 				case DropColumn op -> dropColumn(project, catalog, op, statements);
+				case RenameTable op -> renameTable(project, catalog, op, statements);
+				case RenameColumn op -> renameColumn(project, catalog, op, statements);
+				case SetNullable op -> setNullable(project, catalog, op, statements);
+				case SetUnique op -> setUnique(project, catalog, op, statements);
 				case SetRule op -> setRule(project, catalog, op, statements);
 			};
 		}
@@ -166,6 +176,152 @@ public final class MigrationPlanner {
 		List<ColumnDef> columns = new ArrayList<>(table.columns());
 		columns.remove(column);
 		return catalog.withTable(table.withColumns(columns));
+	}
+
+	/**
+	 * Constraints and indexes carry the table's name inside their own names
+	 * ("notes_slug_key"), and later migrations find them by that derived name.
+	 * So a rename also renames them; otherwise "drop the unique constraint"
+	 * would look for a name that no longer exists.
+	 *
+	 * Things that follow the table by themselves: its rows, its policies, its
+	 * trigger, and foreign keys in other tables (Postgres tracks tables by an
+	 * internal id, not by name). Only our catalog stores the name as text, so
+	 * columns elsewhere that reference this table are updated there.
+	 */
+	private Catalog renameTable(ProjectRef project, Catalog catalog, RenameTable op, List<String> out) {
+		TableDef table = existingTable(catalog, op.table());
+		requireNotBuiltin(table, "renamed");
+		Identifiers.requireValidTable(op.to());
+		if (catalog.table(op.to()).isPresent()) {
+			throw ApiException.conflict("table_exists", "a table named '" + op.to() + "' already exists");
+		}
+		out.add("alter table " + qualified(project, table.name()) + " rename to " + quote(op.to()));
+		for (ColumnDef column : table.columns()) {
+			renameDerived(project, op.to(), table.name(), column.name(), op.to(), column.name(), column, out);
+		}
+		Catalog next = catalog.withoutTable(table.name());
+		for (TableDef other : next.tables()) {
+			for (ColumnDef column : other.columns()) {
+				if (table.name().equals(column.references())) {
+					next = next.withTable(next.table(other.name()).orElseThrow()
+						.withColumn(column.name(), column.withReferences(op.to())));
+				}
+			}
+		}
+		// A table that references itself.
+		TableDef renamed = table.withName(op.to());
+		for (ColumnDef column : table.columns()) {
+			if (table.name().equals(column.references())) {
+				renamed = renamed.withColumn(column.name(), column.withReferences(op.to()));
+			}
+		}
+		return next.withTable(renamed);
+	}
+
+	/**
+	 * Policies that mention the column ("owner_id = tsk.uid()") keep working:
+	 * Postgres stores the column inside a policy by position, not by name. Our
+	 * catalog stores the rule's owner column as text, so it is updated here.
+	 */
+	private Catalog renameColumn(ProjectRef project, Catalog catalog, RenameColumn op, List<String> out) {
+		TableDef table = existingTable(catalog, op.table());
+		ColumnDef column = changeableColumn(table, op.column());
+		Identifiers.requireValidColumn(op.to());
+		if (table.column(op.to()).isPresent()) {
+			throw ApiException.conflict("column_exists",
+					"table '" + table.name() + "' already has a column '" + op.to() + "'");
+		}
+		out.add("alter table " + qualified(project, table.name()) + " rename column " + quote(column.name()) + " to "
+				+ quote(op.to()));
+		renameDerived(project, table.name(), table.name(), column.name(), table.name(), op.to(), column, out);
+		Map<RuleOperation, Rule> rules = new EnumMap<>(RuleOperation.class);
+		table.rules()
+			.forEach((operation, rule) -> rules.put(operation,
+					column.name().equals(rule.ownerColumn()) ? new Rule(rule.kind(), op.to()) : rule));
+		return catalog.withTable(table.withColumn(column.name(), column.withName(op.to())).withRules(rules));
+	}
+
+	/** Renames the unique constraint, foreign key and index that were named after (oldTable, oldColumn). */
+	private static void renameDerived(ProjectRef project, String currentTable, String oldTable, String oldColumn,
+			String newTable, String newColumn, ColumnDef column, List<String> out) {
+		String target = qualified(project, currentTable);
+		String before = oldTable + "_" + oldColumn;
+		String after = newTable + "_" + newColumn;
+		if (column.unique() && !column.system()) {
+			out.add("alter table " + target + " rename constraint " + quote(before + "_key") + " to "
+					+ quote(after + "_key"));
+		}
+		if (column.isReference()) {
+			out.add("alter table " + target + " rename constraint " + quote(before + "_fkey") + " to "
+					+ quote(after + "_fkey"));
+			out.add("alter index \"" + project.schemaName() + "\"." + quote(before + "_idx") + " rename to "
+					+ quote(after + "_idx"));
+		}
+	}
+
+	/**
+	 * "Required" (not null) or "optional". Making a column required fails in
+	 * the database if some row has no value; the whole migration then rolls
+	 * back and the owner sees the database's message.
+	 */
+	private Catalog setNullable(ProjectRef project, Catalog catalog, SetNullable op, List<String> out) {
+		TableDef table = existingTable(catalog, op.table());
+		ColumnDef column = changeableColumn(table, op.column());
+		if (op.nullable() == null) {
+			throw ApiException.badRequest("invalid_operation", "set_nullable needs nullable: true or false");
+		}
+		if (column.nullable() == op.nullable()) {
+			throw ApiException.badRequest("no_change", "column '" + column.name() + "' is already "
+					+ (column.nullable() ? "optional" : "required"));
+		}
+		if (!op.nullable()) {
+			if (table.builtin()) {
+				// Signup creates the row with only an email.
+				throw ApiException.badRequest("invalid_column",
+						"columns added to '" + table.name() + "' must stay optional");
+			}
+			if (column.onDelete() == OnDelete.SET_NULL) {
+				throw ApiException.badRequest("invalid_column",
+						"this column is set to null when the row it references is deleted, so it must stay optional");
+			}
+		}
+		out.add("alter table " + qualified(project, table.name()) + " alter column " + quote(column.name())
+				+ (op.nullable() ? " drop not null" : " set not null"));
+		return catalog.withTable(table.withColumn(column.name(), column.withNullable(op.nullable())));
+	}
+
+	/** Adding fails in the database if two rows already hold the same value. */
+	private Catalog setUnique(ProjectRef project, Catalog catalog, SetUnique op, List<String> out) {
+		TableDef table = existingTable(catalog, op.table());
+		ColumnDef column = changeableColumn(table, op.column());
+		if (op.unique() == null) {
+			throw ApiException.badRequest("invalid_operation", "set_unique needs unique: true or false");
+		}
+		if (column.unique() == op.unique()) {
+			throw ApiException.badRequest("no_change",
+					"column '" + column.name() + "' is already " + (column.unique() ? "unique" : "not unique"));
+		}
+		if (op.unique() && column.type() == ColumnType.JSONB) {
+			throw ApiException.badRequest("invalid_column", "a jsonb column cannot be unique");
+		}
+		String constraint = quote(table.name() + "_" + column.name() + "_key");
+		String target = qualified(project, table.name());
+		out.add(op.unique()
+				? "alter table " + target + " add constraint " + constraint + " unique (" + quote(column.name()) + ")"
+				: "alter table " + target + " drop constraint " + constraint);
+		return catalog.withTable(table.withColumn(column.name(), column.withUnique(op.unique())));
+	}
+
+	/** A column the owner created (not id, created_at or the built-in email). */
+	private static ColumnDef changeableColumn(TableDef table, String name) {
+		ColumnDef column = table.column(name == null ? "" : name)
+			.orElseThrow(() -> ApiException.badRequest("unknown_column",
+					"table '" + table.name() + "' has no column '" + name + "'"));
+		if (column.system()) {
+			throw ApiException.badRequest("system_column", "column '" + column.name() + "' cannot be changed");
+		}
+		return column;
 	}
 
 	/**

@@ -20,6 +20,10 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo;
 		@JsonSubTypes.Type(value = SchemaOperation.DropTable.class, name = "drop_table"),
 		@JsonSubTypes.Type(value = SchemaOperation.AddColumn.class, name = "add_column"),
 		@JsonSubTypes.Type(value = SchemaOperation.DropColumn.class, name = "drop_column"),
+		@JsonSubTypes.Type(value = SchemaOperation.RenameTable.class, name = "rename_table"),
+		@JsonSubTypes.Type(value = SchemaOperation.RenameColumn.class, name = "rename_column"),
+		@JsonSubTypes.Type(value = SchemaOperation.SetNullable.class, name = "set_nullable"),
+		@JsonSubTypes.Type(value = SchemaOperation.SetUnique.class, name = "set_unique"),
 		@JsonSubTypes.Type(value = SchemaOperation.SetRule.class, name = "set_rule") })
 public sealed interface SchemaOperation {
 
@@ -53,6 +57,20 @@ public sealed interface SchemaOperation {
 	}
 
 	record DropColumn(String table, String column) implements SchemaOperation {
+	}
+
+	record RenameTable(String table, String to) implements SchemaOperation {
+	}
+
+	record RenameColumn(String table, String column, String to) implements SchemaOperation {
+	}
+
+	/** nullable=false means every row must have a value ("required"). */
+	record SetNullable(String table, String column, Boolean nullable) implements SchemaOperation {
+	}
+
+	/** unique=true means no two rows may hold the same value. */
+	record SetUnique(String table, String column, Boolean unique) implements SchemaOperation {
 	}
 
 	/**
