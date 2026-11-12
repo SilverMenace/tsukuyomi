@@ -15,7 +15,11 @@ import tools.jackson.databind.ObjectMapper;
  */
 public class TestClient {
 
-	public record Response(int status, String body, String setCookie) {
+	public record Response(int status, String body, String setCookie, java.net.http.HttpHeaders headers) {
+
+		public String header(String name) {
+			return headers.firstValue(name).orElse(null);
+		}
 
 		public JsonNode json() {
 			return new ObjectMapper().readTree(body);
@@ -31,6 +35,10 @@ public class TestClient {
 
 	private String apiKey; // apikey header, when calling the data API
 
+	private String bearer; // end user's access token
+
+	private String origin; // set to act like a browser page on another site
+
 	public TestClient(int port) {
 		this.baseUrl = "http://localhost:" + port;
 	}
@@ -39,6 +47,37 @@ public class TestClient {
 		TestClient copy = new TestClient(baseUrl);
 		copy.apiKey = apiKey;
 		return copy;
+	}
+
+	/** Same API key, acting as the end user who owns this access token. */
+	public TestClient withBearer(String token) {
+		TestClient copy = withApiKey(apiKey);
+		copy.bearer = token;
+		return copy;
+	}
+
+	public TestClient withOrigin(String origin) {
+		TestClient copy = withApiKey(apiKey);
+		copy.bearer = bearer;
+		copy.origin = origin;
+		return copy;
+	}
+
+	/** The request a browser sends before a cross-site call, to ask permission. */
+	public Response preflight(String path, String method) {
+		try {
+			HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + path))
+				.method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+				.header("Origin", origin)
+				.header("Access-Control-Request-Method", method)
+				.header("Access-Control-Request-Headers", "apikey,authorization,content-type")
+				.build();
+			HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+			return new Response(response.statusCode(), response.body(), null, response.headers());
+		}
+		catch (Exception e) {
+			throw new IllegalStateException(e);
+		}
 	}
 
 	private TestClient(String baseUrl) {
@@ -84,13 +123,19 @@ public class TestClient {
 			if (apiKey != null) {
 				request.header("apikey", apiKey);
 			}
+			if (bearer != null) {
+				request.header("Authorization", "Bearer " + bearer);
+			}
+			if (origin != null) {
+				request.header("Origin", origin);
+			}
 			HttpResponse<String> response = http.send(request.build(), HttpResponse.BodyHandlers.ofString());
 			String setCookie = response.headers().firstValue("Set-Cookie").orElse(null);
 			if (setCookie != null) {
 				String pair = setCookie.split(";", 2)[0];
 				cookie = pair.endsWith("=") ? null : pair;
 			}
-			return new Response(response.statusCode(), response.body(), setCookie);
+			return new Response(response.statusCode(), response.body(), setCookie, response.headers());
 		}
 		catch (Exception e) {
 			throw new IllegalStateException(e);

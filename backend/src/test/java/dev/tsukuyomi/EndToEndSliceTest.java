@@ -166,7 +166,7 @@ class EndToEndSliceTest {
 		String twoSteps = "{\"operations\":[{\"op\":\"create_table\",\"table\":\"other\",\"columns\":[]},"
 				+ "{\"op\":\"add_column\",\"table\":\"notes\",\"column\":{\"name\":\"must\",\"type\":\"text\",\"nullable\":false}}]}";
 		assertThat(dashboard.post(base + "/migrations", twoSteps).status()).isEqualTo(400);
-		assertThat(dashboard.get(base + "/schema").json().get("tables").size()).isEqualTo(1); // "other" was not created
+		assertThat(dashboard.get(base + "/schema").json().get("tables").size()).isEqualTo(2); // notes + users; "other" was not created
 	}
 
 	@Test

@@ -257,7 +257,7 @@ class QueryApiTest {
 			.isEqualTo("still here");
 		assertThat(ownerJdbc.queryForObject(
 				"select count(*) from information_schema.tables where table_schema = ?", Integer.class, schemaName))
-			.isEqualTo(4);
+			.isEqualTo(5); // four designed tables + the built-in users table
 		assertThat(titles("order=title")).containsExactly("Alpha report", "Beta notes", "Delta draft", "Gamma report");
 		assertThat(ownerJdbc.queryForObject("select count(*) from tsk_platform.account", Integer.class)).isPositive();
 	}
