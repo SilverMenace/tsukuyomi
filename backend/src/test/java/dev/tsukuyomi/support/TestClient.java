@@ -53,6 +53,14 @@ public class TestClient {
 		return send("POST", path, json);
 	}
 
+	public Response patch(String path, String json) {
+		return send("PATCH", path, json);
+	}
+
+	public String apiKey() {
+		return apiKey;
+	}
+
 	public Response delete(String path) {
 		return send("DELETE", path, null);
 	}
