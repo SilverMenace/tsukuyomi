@@ -372,3 +372,110 @@ This is the answer to "can a bug in your API leak data?", and the honest version
   That is safe because these endpoints never read a cookie, so a foreign page cannot borrow a
   visitor's login; it can only use keys and tokens it already has.
 - `/platform` (cookie session) sends no CORS headers, so only the dashboard's own origin can call it.
+
+## M4 — live updates
+
+### D31. Triggers and LISTEN/NOTIFY, not the write-ahead log
+
+The server has to find out that a row changed. Two ways:
+
+- **Read the write-ahead log (logical replication).** Postgres streams every committed change to
+  a consumer. This is what Supabase Realtime does. It adds no work to the writing transaction and
+  scales to high write rates. It needs a replication slot, a decoder for the stream, and care:
+  a slot whose consumer is down makes the database keep log files until the disk is full.
+- **A trigger on each table (chosen).** `tsk.record_change()` runs after every insert, update and
+  delete, writes one small row to `tsk_platform.change_event` and calls `pg_notify`. One
+  connection of ours runs `LISTEN` and receives the notification when the transaction commits.
+- **Why:** it is plain SQL that works on any Postgres, including a free hosted one, and it fits in
+  the time available. The whole mechanism is one SQL function and one Java class.
+- **Cost:** every write does one extra insert and one notify, inside the writer's transaction.
+  A batch insert of 100 rows makes 100 log rows. Fine at this scale; it is the reason large
+  systems use the log instead. Listed in the README under "Next".
+
+### D32. A change says which row, never what is in it
+
+- The notification and the log row hold: table, operation, row id, and two transaction numbers.
+  They never hold column values.
+- For each change, the hub reads the row **once per distinct identity** subscribed to that table,
+  through the same `RowService` and `TenantTransaction` as a normal `GET`. Row-level security
+  answers "may this identity see it?". Not visible means no message. There is no second copy of
+  the rules in Java that could drift from the policies.
+- **Alternative:** put the new row into the notification and filter in Java. Faster (no read per
+  identity) but the permission check would be re-implemented outside the database, which is
+  exactly what D25 refuses. Also, `NOTIFY` payloads are limited to about 8 KB.
+- **Cost:** one small transaction per identity per change. 50 users watching one table means 50
+  reads for each change to it. Identities are grouped, so 50 anonymous visitors cost one read.
+- **Deletes are the exception.** A deleted row cannot be read, so a delete is sent to every
+  subscriber of the table with the row id only. Someone who could not see the row learns that
+  "some row with this id was deleted", and nothing else. Supabase makes the same trade-off.
+  Closing it would mean keeping the old row and evaluating policies against it by hand.
+- **Updates that hide a row** (the owner column changes): the old owner gets no message, because
+  the row is no longer visible to them. Their copy goes stale until they reload.
+
+### D33. The cursor is a transaction number, not an event id
+
+A client that loses its connection sends back a cursor and gets what it missed from the log.
+The obvious cursor, "last event id I saw", is wrong:
+
+- Event ids come from a sequence **when the row is written**. Transactions commit in a different
+  order. A writes (event 5), B writes (event 7) and commits, the client receives 7 and
+  disconnects, then A commits. "Everything after 7" never returns 5.
+- **What we store instead:** with each event, the trigger records `oldest_running`: the lowest
+  transaction id still in progress at that moment (`pg_snapshot_xmin`). Every transaction below
+  that number had already finished, so its notification was sent, and delivered, earlier.
+- **The cursor** sent with each event is the largest `oldest_running` the subscription has seen.
+  Replay is "events from transactions with id >= cursor". In the example, A was still running
+  when B wrote, so B's cursor is at most A's id, and A is included.
+- **Price: at-least-once.** Replay can repeat an event the client already has (always the last
+  one, at least). Each event carries an `eventId`; clients skip ids they have seen.
+- `LiveUpdatesTest.aChangeThatCommitsLateIsNotSkippedOnReplay` holds a transaction open to
+  produce exactly this order.
+- **Alternative considered:** assign a strictly increasing number at commit time. Postgres has no
+  cheap way to do that without making all writers queue on one lock.
+
+### D34. When the server cannot know what was missed, it says "reload"
+
+Three cases end with a `resync` message (or `"resync": true` in the answer to `subscribe`):
+
+1. The cursor is older than the log. Events are kept for 10 minutes; `change_floor` records how
+   far the log has been trimmed.
+2. More than 200 events were missed. Replaying them one read at a time would stall everyone else.
+3. The server's own `LISTEN` connection dropped (the free database restarts or sleeps).
+   Notifications are not stored by Postgres for absent listeners.
+
+- **Why not replay server-side in case 3:** it is possible with the same cursor idea, but it is a
+  second replay mechanism for a rare event. Telling clients to reload is always correct.
+- **Honest consequence:** a reconnect after more than 10 idle minutes always reloads, even if
+  nothing changed, because the server cannot prove that.
+
+### D35. One thread dispatches everything
+
+- `LiveHub` runs changes, subscribes, unsubscribes and disconnects on a single thread; other
+  threads only add tasks to its queue. The subscription maps need no locks, replay cannot
+  interleave with live events, and each client receives changes in commit order.
+- **Cost:** throughput is one database read at a time. If the queue reaches 10,000 tasks the
+  backlog is dropped and every client is told to reload (D34) rather than falling further behind.
+- **Subscriptions live in memory**, so live updates work on one server instance only. A second
+  instance would need each instance to listen and fan out to its own clients; that part would
+  already work, but connection limits would then be per instance.
+
+### D36. The listener exists only while someone is subscribed
+
+- The `LISTEN` connection opens with the first subscription and closes with the last.
+- **Why:** the free database goes to sleep after five idle minutes, which is what keeps it free.
+  A permanent connection that we keep checking would hold it awake around the clock. For the
+  same reason the log is trimmed only when something was written since the last trim.
+- **Order matters on start:** `LISTEN` first, then choose the starting cursor. The other way
+  round, a change committing in between would be neither replayed nor heard.
+
+### D37. WebSocket authentication is the first message
+
+- Browsers cannot set headers on a WebSocket, and a key in the URL would end up in server logs.
+  So the handshake is open and the first message must be `auth` with the API key and optional
+  token; nothing else is accepted before it, and silent connections are closed after 10 seconds.
+- The key and token go through the same `IdentityResolver` as HTTP requests, so there is one
+  definition of "who is this".
+- A connection's identity never changes. When a user's token expires the server closes the
+  connection with code 4401; the client reconnects with a fresh token and its cursor.
+- Limits: 300 connections per server, 100 per project, 20 tables per connection, 4 KB per
+  message. A client that cannot take its messages within 5 seconds is disconnected.

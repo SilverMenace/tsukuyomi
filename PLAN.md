@@ -248,15 +248,18 @@ Decisions and their reasons:
 - **Triggers + LISTEN/NOTIFY, not WAL logical replication.** WAL decoding is what Supabase does and
   scales better, but it needs replication slots and far more code. Triggers work on any Postgres and
   fit in 4 days. `DECISIONS.md` will cover this comparison in depth; expect the question in interviews.
-- **NOTIFY carries only an event id**, because payloads are limited to 8 KB.
+- **NOTIFY carries a pointer, not data**: table, operation, row id and two transaction numbers.
+  Never column values (payloads are limited to 8 KB, and the row must be read under the
+  subscriber's identity anyway).
 - **Permissions on events:** the row is re-read under each subscriber's identity, so RLS decides who sees
   what. No second copy of the rules in Java. Delete events carry only the primary key (the row is gone,
   so it cannot be re-checked); this is the same trade-off Supabase makes.
-- **Missed events:** the client sends the last event id on reconnect and the server replays from the
-  outbox (kept ~10 minutes). The subtle bug here is that ids can commit out of order; the plan is to
-  fetch by notified id on the live path and use a snapshot-safe read for catch-up. This gets its own test.
+- **Missed events:** the client sends its last cursor on reconnect and the server replays from the
+  outbox (kept 10 minutes). Event ids can commit out of order, so the cursor is a transaction
+  number ("oldest transaction still running"), not an event id. Built and tested in M4; see
+  `DECISIONS.md` D33.
 - **Free-tier reality:** Neon suspends an idle database, which drops the listener. The listener
-  reconnects and catches up from the outbox.
+  runs only while someone is subscribed, reconnects if it breaks, and then tells clients to reload.
 - **Protocol:** plain WebSocket with small JSON messages (`auth`, `subscribe`, `unsubscribe`, `event`,
   `error`), not STOMP, so you can read every byte of it.
 - **Limit:** subscriber state is in memory, so this is single-instance. Stated openly in the README.

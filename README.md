@@ -5,9 +5,10 @@ live updates, without writing backend code.** A small, self-hostable backend-as-
 
 **Live:** https://tsukuyomi-l9kg.onrender.com (free hosting: the first request after 15 idle minutes takes about a minute to wake the server)
 
-> Status: under construction (M3 of 7 done: sign up, create a project, design tables with relations,
+> Status: under construction (M4 of 7 done: sign up, create a project, design tables with relations,
 > a REST API with filtering, sorting, pagination and related-record expansion, end-user signup and
-> login, and permission rules per table enforced by the database). See `PLAN.md` for the build order.
+> login, permission rules per table enforced by the database, and live updates over WebSocket).
+> See `PLAN.md` for the build order.
 
 ## Run locally
 
@@ -186,6 +187,50 @@ curl -X PATCH "$URL/api/v1/posts?id=eq.<post id>" -H "apikey: $KEY" -H "Content-
   -d '{"priority": 5}'
 curl -X DELETE "$URL/api/v1/posts?id=eq.<post id>" -H "apikey: $KEY"
 ```
+
+## Live updates
+
+Connect a WebSocket to `/realtime/v1` and exchange small JSON messages. The first message says who
+you are, with the same key and token as the REST API.
+
+```js
+const ws = new WebSocket('wss://tsukuyomi-l9kg.onrender.com/realtime/v1')
+ws.onopen = () => ws.send(JSON.stringify({ type: 'auth', apikey: ANON_KEY, token: ACCESS_TOKEN }))
+ws.onmessage = (m) => {
+  const msg = JSON.parse(m.data)
+  if (msg.type === 'ready') ws.send(JSON.stringify({ type: 'subscribe', table: 'notes' }))
+  if (msg.type === 'event') console.log(msg.op, msg.id, msg.row)
+}
+```
+
+| You send | Server answers |
+|---|---|
+| `{"type":"auth","apikey":"…","token":"…"}` (token optional) | `{"type":"ready","role":"user"}` |
+| `{"type":"subscribe","table":"notes","since":"<cursor>"}` (since optional) | `{"type":"subscribed","table":"notes","cursor":"812","resync":false}` |
+| `{"type":"unsubscribe","table":"notes"}` | `{"type":"unsubscribed","table":"notes"}` |
+| `{"type":"ping"}` | `{"type":"pong"}` |
+
+Then, for each change you are allowed to see:
+
+```json
+{"type":"event","table":"notes","op":"insert","id":"<row id>","row":{"id":"…","title":"…"},
+ "eventId":"41","cursor":"815"}
+```
+
+- **Permissions:** you receive a change only if a `GET` of that row would return it to you. The
+  same rules apply; there is nothing extra to configure.
+- **`op`** is `insert`, `update` or `delete`. For `delete`, `row` is `null`, and it is sent to
+  every subscriber of the table (the row is gone, so it cannot be checked). It reveals only the id.
+- **Reconnecting:** remember the last `cursor`. Send it as `since` when you subscribe again and
+  you get what you missed. The same event can arrive twice; ignore an `eventId` you have seen.
+- **`resync`:** if the answer says `"resync": true`, or a `{"type":"resync","table":…}` message
+  arrives, the server cannot tell what you missed (away for more than 10 minutes, more than 200
+  changes, or a server-side reconnect). Load the table again with the REST API.
+- **Errors:** `{"type":"error","code":"…","message":"…"}`. Codes: `unauthorized`, `invalid_key`,
+  `invalid_token`, `token_expired` (connection closes with code 4401), `unknown_table`,
+  `already_subscribed`, `too_many_subscriptions`, `too_many_connections`, `bad_message`,
+  `unavailable`.
+- **Limits:** 100 connections per project, 20 tables per connection. One server instance only.
 
 ## Documents
 

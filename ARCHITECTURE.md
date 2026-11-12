@@ -160,6 +160,44 @@ Login (`POST /auth/v1/login`): `ApiKeyFilter` identifies the project, `AuthServi
 BCrypt hash in `tsk_platform.end_user`, then issues a JWT signed with the project's secret
 (`JwtCodec`) and a single-use refresh token stored as a hash.
 
-## Coming next
+## Live updates: from a write to a subscriber's screen
 
-- M4: live-update subscription (trigger → outbox → NOTIFY → listener → WebSocket).
+```mermaid
+sequenceDiagram
+    participant W as Writer (any API request)
+    participant PG as PostgreSQL
+    participant L as ChangeListener (LISTEN)
+    participant H as LiveHub (one thread)
+    participant C as Subscriber (WebSocket)
+
+    C->>H: auth {apikey, token} then subscribe {table}
+    H->>L: start (first subscriber only)
+    L->>PG: LISTEN tsk_changes
+    H-->>C: subscribed {cursor}
+
+    W->>PG: INSERT INTO notes ...
+    Note over PG: trigger tsk.record_change():<br/>insert into change_event,<br/>pg_notify(table, op, row id)
+    W->>PG: COMMIT
+    PG-->>L: notification (only after commit)
+    L->>H: queue the change
+    loop each distinct identity subscribed to notes
+        H->>PG: SET LOCAL ROLE ...; SELECT the row by id
+        PG-->>H: the row, or nothing (row-level security)
+    end
+    H-->>C: event {op, id, row, eventId, cursor} (only if the row was visible)
+```
+
+The pieces, in the order a change passes through them:
+
+| Piece | File | Job |
+|---|---|---|
+| Trigger | `V4__change_events.sql`, `schema/ChangeTrigger.java` | Record "row X of table T changed" and notify |
+| Listener | `live/ChangeListener.java` | One connection that only listens; reconnects if it breaks |
+| Hub | `live/LiveHub.java` | Who is subscribed; reads the row as each identity; sends |
+| Log | `live/EventLog.java` | Replay for reconnecting clients; trimmed after 10 minutes |
+| Endpoint | `live/LiveSocketHandler.java` | The JSON protocol on `/realtime/v1`, limits |
+
+Reconnecting: the client sends `subscribe {table, since: <last cursor>}`. The hub reads the missed
+events from `change_event`, checks each against the client's identity exactly as above, and sends
+them before any new live event. If it cannot know what was missed it answers `resync: true` and
+the client loads the table again (DECISIONS.md D33, D34).
