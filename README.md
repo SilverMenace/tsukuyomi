@@ -9,8 +9,98 @@ live updates, without writing backend code.** A small, self-hostable backend-as-
 shared board and live updates. It is static files on GitHub Pages; everything else is one Tsukuyomi
 project. Source in [`demo/`](demo), about 300 lines, no backend code.
 
-> Status: under construction (M6 of 7 done: everything in the pitch works and is deployed; what
-> remains is rate limiting, quotas, measurements and final documentation). See `PLAN.md`.
+| Demo app (zero backend code) | Dashboard: SQL preview before a change | Dashboard: rules |
+|---|---|---|
+| ![Task board with a private and a shared column](docs/img/demo-board.png) | ![Generated SQL shown before it runs](docs/img/dashboard-sql-preview.png) | ![Permission rules per table and operation](docs/img/dashboard-rules.png) |
+
+## What it does
+
+- **Projects.** Sign up, create a project, get an API URL and two keys. Each project lives in its
+  own PostgreSQL schema with its own database roles; projects cannot see each other.
+- **Schema designer.** Create and change tables, columns, relations and constraints in the
+  dashboard. Every change is a versioned migration; you see the SQL before it runs.
+- **Instant REST API.** Every table gets filtering, sorting, pagination and related-record
+  expansion through query parameters. No request text ever becomes SQL (see "Numbers").
+- **End users.** Apps built on a project have their own signup and login (`/auth/v1`).
+- **Permission rules.** Per table and operation: nobody, anyone, logged-in users, or the row's
+  owner. Stored as PostgreSQL row-level security policies, so a mistake in the API layer cannot
+  return another user's rows.
+- **Live updates.** Subscribe to a table over a WebSocket and receive the changes you are allowed
+  to see, with replay after a lost connection.
+- **A client SDK and a demo app** that uses nothing else.
+
+## Numbers
+
+Measured on 12 November 2026. What each figure does and does not show is in `DECISIONS.md` D49.
+
+**Local** (`node scripts/bench.mjs`): Apple M4 laptop (10 cores, 16 GB) running the load
+generator, the server and PostgreSQL 18 in Docker together; 16 requests in flight for 10 seconds
+per test; 2,000-row table; rate limits off; 0 errors.
+
+| Request | Requests per second | p50 | p95 | p99 |
+|---|---|---|---|---|
+| Read 20 rows (service key) | 1,787 | 8.6 ms | 12.6 ms | 16.2 ms |
+| Read 20 rows as a user (row-level security filtering) | 1,620 | 9.4 ms | 14.9 ms | 22.0 ms |
+| Filter + sort + expand a related record | 1,461 | 10.5 ms | 15.7 ms | 20.6 ms |
+| Insert one row | 1,458 | 10.4 ms | 14.8 ms | 17.7 ms |
+| Live update: insert sent to event received | | 4.1 ms | 5.0 ms | 6.7 ms |
+
+**Live** (free Render instance and free Neon database, both in Singapore, measured from India,
+one request at a time):
+
+| Request | p50 | p95 |
+|---|---|---|
+| Health check (network only, no database) | 108 ms | |
+| Read 20 rows | 116 ms | 192 ms |
+| Insert one row | 114 ms | 136 ms |
+| Live update: insert sent to event received | 126 ms | 349 ms |
+
+So on the live host almost all of the time is distance; the server and database add about 10 ms.
+After 15 idle minutes the free server sleeps, and the next request waits about a minute.
+
+**Tests:** 144 backend tests against a real PostgreSQL, 10 SDK tests, run on every push.
+
+| What is attacked | How |
+|---|---|
+| SQL injection | A corpus of classic payloads in every position of a request, plus 40,000 generated requests from a fixed seed; an independent check asserts that no request text appears in the SQL (`InjectionTest`) |
+| Permissions | Other users' rows, forged and foreign tokens, anonymous callers, and a simulated bug in the API layer that forgets every filter (`AuthAndRulesTest`) |
+| Project isolation | Keys, tokens and live subscriptions of one project used against another |
+| Live updates | Who hears a change, a change that commits late, a lost server connection (`LiveUpdatesTest`) |
+| Limits | Password guessing, forged addresses, encoded paths, floods, ten concurrent inserts at the row quota (`LimitsTest`) |
+
+**Size:** about 6,200 lines of Java, 3,300 lines of tests, 1,500 lines of dashboard, 700 lines of
+SDK and 300 lines of demo.
+
+## Limits
+
+| Limit | Value |
+|---|---|
+| Requests per address | 20 per second (burst 100); signup and login 10 per minute |
+| Requests per API key | 50 per second (burst 200) |
+| Request body | 1 MB |
+| Rows per table | 10,000 |
+| Tables per project, columns per table | 15, 30 |
+| Projects per account, end users per project | 3, 1,000 |
+| Rows per page, per query in total | 100, 25,000 |
+| Query time | 3 seconds |
+| Live connections | 100 per project, 20 per address |
+
+A refused request gets `429` with code `rate_limited` and a `Retry-After` header, `413 too_large`,
+or `409 quota_rows`.
+
+## Known limits of the design
+
+Stated plainly, with the reasoning in `DECISIONS.md`:
+
+- **One server instance.** Live subscriptions and rate-limit counts are in memory (D35, D45).
+- **Rules are per table and operation**, not per column or "owner or public" (D44).
+- **If an attacker could run SQL of their choosing** on the data connection, row-level security
+  would not stop them from switching roles. The query compiler is what prevents that; the two
+  defences cover different halves (D27).
+- **Live updates use triggers**, which add one small insert to every write (D31).
+- **Signup tells you whether an email is registered**, and there is no email verification (D12).
+- **On the live host a refused WebSocket ends about 20 seconds late**; the error message itself
+  arrives at once and the SDK acts on that (D37).
 
 ## Run locally
 
@@ -163,6 +253,9 @@ Every error has the same shape:
 | 403 | `forbidden` | A permission rule refused the write. (Reads never return 403: rows you may not see are simply absent.) |
 | 404 | `not_found` | No table with that name |
 | 409 | `constraint_violation` | Not null, unique or foreign key rule broken |
+| 409 | `quota_rows` | The table already holds the maximum number of rows |
+| 413 | `too_large` | The request body is larger than 1 MB |
+| 429 | `rate_limited` | Too many requests; wait for the number of seconds in `Retry-After` |
 | 503 | `timeout` | The query ran longer than the statement timeout (3 seconds by default) |
 
 ### Examples
@@ -265,9 +358,9 @@ user can edit any field of any row, including the author's name.
 
 ## Documents
 
-- `PLAN.md`: architecture, data model, milestones
-- `DECISIONS.md`: every significant choice and its trade-offs
-- `ARCHITECTURE.md`: request flows
+- [`ARCHITECTURE.md`](ARCHITECTURE.md): the system in one picture, the data model, and each request flow with a diagram
+- [`DECISIONS.md`](DECISIONS.md): 49 decisions, each with the alternatives and what it costs
+- [`sdk/README.md`](sdk/README.md): the client
 
 ## Next (not in v1)
 
