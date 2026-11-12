@@ -36,7 +36,7 @@ class MigrationPlannerTest {
 				List.of(new ColumnSpec("title", ColumnType.TEXT, false, null),
 						new ColumnSpec("slug", ColumnType.TEXT, null, true)))));
 
-		assertThat(plan.statements()).hasSize(5);
+		assertThat(plan.statements()).hasSize(6);
 		assertThat(plan.statements().get(0)).startsWith("create table \"p_0123456789ab\".\"notes\"")
 			.contains("\"id\" uuid primary key default uuidv7()")
 			.contains("\"title\" text not null")

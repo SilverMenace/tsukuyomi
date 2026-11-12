@@ -107,6 +107,8 @@ public final class MigrationPlanner {
 		// The service key is for trusted server-side code: it may do everything.
 		out.add("create policy \"service_all\" on " + table + " for all to "
 				+ quote(project.roleName(TenantRole.SERVICE)) + " using (true) with check (true)");
+		// Live updates: record every row change (see ChangeTrigger).
+		out.add(ChangeTrigger.statement(table));
 
 		return catalog.withTable(new TableDef(op.table(), columns));
 	}

@@ -45,7 +45,8 @@ public final class BuiltinTables {
 				"alter table " + table + " force row level security",
 				"grant select, update on " + table + " to " + anon + ", " + user + ", " + service,
 				"create policy \"service_all\" on " + table + " for all to " + service + " using (true) with check (true)",
-				"create policy \"rule_select\" on " + table + " for select to " + user + " using (\"id\" = tsk.uid())");
+				"create policy \"rule_select\" on " + table + " for select to " + user + " using (\"id\" = tsk.uid())",
+				ChangeTrigger.statement(table));
 	}
 
 }
