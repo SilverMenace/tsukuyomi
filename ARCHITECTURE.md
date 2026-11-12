@@ -204,3 +204,23 @@ Reconnecting: the client sends `subscribe {table, since: <last cursor>}`. The hu
 events from `change_event`, checks each against the client's identity exactly as above, and sends
 them before any new live event. If it cannot know what was missed it answers `resync: true` and
 the client loads the table again (DECISIONS.md D33, D34).
+
+## The demo app: where each piece runs
+
+```mermaid
+flowchart LR
+    subgraph Browser
+        D[demo/ React app] --> S[sdk/ TsukuyomiClient]
+    end
+    GH[GitHub Pages<br/>static files only] -. serves the page .-> D
+    S -->|"/auth/v1  login, refresh"| T[Tsukuyomi server]
+    S -->|"/api/v1  rows"| T
+    S <-->|"/realtime/v1  WebSocket"| T
+    T --> P[(PostgreSQL<br/>project schema + policies)]
+```
+
+The demo has no server of its own. Its whole backend is two tables and their rules
+(`scripts/demo-project.mjs`); the page ships the project's anon key, and the database decides what
+that key and each logged-in user may do. `sdk/src/query.ts` builds the URLs described in the
+README, `sdk/src/auth.ts` keeps the login fresh, and `sdk/src/live.ts` is the client half of the
+live-update flow above (reconnect, cursor, repeated events).
