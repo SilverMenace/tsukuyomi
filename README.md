@@ -230,6 +230,9 @@ Then, for each change you are allowed to see:
   `invalid_token`, `token_expired` (connection closes with code 4401), `unknown_table`,
   `access_changed` (a key was replaced; reconnect), `already_subscribed`, `too_many_subscriptions`, `too_many_connections`, `bad_message`,
   `unavailable`.
+- **After `invalid_key`, `invalid_token`, `token_expired` or `access_changed`** the server stops
+  sending and closes. Treat the error message as the signal and close your side: behind the free
+  host's proxy the close itself was measured to arrive about 20 seconds later, as code 1006.
 - **Limits:** 100 connections per project, 20 tables per connection. One server instance only.
 
 ## Documents

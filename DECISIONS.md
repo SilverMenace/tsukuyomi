@@ -487,6 +487,11 @@ Three cases end with a `resync` message (or `"resync": true` in the answer to `s
   security review; without it a leaked key would keep working on open connections).
 - A connection's identity never changes. When a user's token expires the server closes the
   connection with code 4401; the client reconnects with a fresh token and its cursor.
+- **Measured on the live host:** the error message arrives at once and the server stops sending
+  at once (checked by replacing a key and then changing a row), but the client sees the
+  connection end about 20 seconds later with code 1006 instead of 4401. Locally it is immediate
+  with 4401. The close frame does not make it through the host's proxy. So clients must act on
+  the error message, not wait for the close. Cause not investigated yet.
 - **Known gap:** connections that have not authenticated yet count towards the server-wide
   limit for up to 10 seconds, and there is no per-address limit, so one machine can use up the
   slots. Per-address limits come with rate limiting in M7.
