@@ -306,9 +306,12 @@ class LiveUpdatesTest {
 	void aChangeThatCommitsLateIsNotSkippedOnReplay() throws Exception {
 		CountDownLatch written = new CountDownLatch(1);
 		CountDownLatch mayCommit = new CountDownLatch(1);
-		UUID slowId = UUID.randomUUID();
+		// The slow change is an update. (Two inserts into one table can no longer
+		// overlap: the row-quota trigger makes them wait for each other.)
+		UUID slowId = UUID.fromString(
+				service.post("/api/v1/posts", "{\"body\":\"before\"}").json().get("id").asString());
 		Thread slow = Thread.ofVirtual().start(() -> tenant.execute(TenantIdentity.service(project), jdbc -> {
-			jdbc.update("insert into posts (id, body) values (?, 'A: written first, committed last')", slowId);
+			jdbc.update("update posts set body = 'A: written first, committed last' where id = ?", slowId);
 			written.countDown();
 			try {
 				mayCommit.await(20, TimeUnit.SECONDS);
