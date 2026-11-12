@@ -39,6 +39,8 @@ public class TestClient {
 
 	private String origin; // set to act like a browser page on another site
 
+	private String forwardedFor; // what a proxy in front of the server would add
+
 	public TestClient(int port) {
 		this.baseUrl = "http://localhost:" + port;
 	}
@@ -53,6 +55,15 @@ public class TestClient {
 	public TestClient withBearer(String token) {
 		TestClient copy = withApiKey(apiKey);
 		copy.bearer = token;
+		return copy;
+	}
+
+	/** Pretends the request passed through a proxy that saw it come from this address. */
+	public TestClient from(String forwardedFor) {
+		TestClient copy = withApiKey(apiKey);
+		copy.bearer = bearer;
+		copy.cookie = cookie;
+		copy.forwardedFor = forwardedFor;
 		return copy;
 	}
 
@@ -128,6 +139,9 @@ public class TestClient {
 			}
 			if (origin != null) {
 				request.header("Origin", origin);
+			}
+			if (forwardedFor != null) {
+				request.header("X-Forwarded-For", forwardedFor);
 			}
 			HttpResponse<String> response = http.send(request.build(), HttpResponse.BodyHandlers.ofString());
 			String setCookie = response.headers().firstValue("Set-Cookie").orElse(null);
