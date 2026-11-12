@@ -5,9 +5,9 @@ live updates, without writing backend code.** A small, self-hostable backend-as-
 
 **Live:** https://tsukuyomi-l9kg.onrender.com (free hosting: the first request after 15 idle minutes takes about a minute to wake the server)
 
-> Status: under construction (M2 of 7 done: sign up, create a project, design tables with relations,
-> and use a REST API with filtering, sorting, pagination, related-record expansion and
-> insert/update/delete, authenticated by API key). See `PLAN.md` for the build order.
+> Status: under construction (M3 of 7 done: sign up, create a project, design tables with relations,
+> a REST API with filtering, sorting, pagination and related-record expansion, end-user signup and
+> login, and permission rules per table enforced by the database). See `PLAN.md` for the build order.
 
 ## Run locally
 
@@ -46,6 +46,46 @@ apikey: <key>
 `PATCH` and `DELETE` refuse to run without a filter, so a typo cannot touch every row. They accept
 only filters (no `select`, `order`, `limit` or `offset`). System columns (`id`, `created_at`) cannot
 be written.
+
+### End users and permission rules
+
+Apps built on a project use the **anon** key, which is safe to ship in a browser. What that key
+may do is decided per table and per operation in the dashboard's Rules tab:
+
+| Rule | Who is let through |
+|---|---|
+| nobody (default) | only the service key |
+| anyone | anyone with the anon key, logged in or not |
+| authenticated | any logged-in end user |
+| owner | only the logged-in user whose id is in a chosen column of the row |
+
+Rules are stored as PostgreSQL row-level security policies, so the database enforces them on every
+row of every query, including expanded related records. The **service** key bypasses rules and is
+for trusted server-side code only.
+
+End users sign up and log in through `/auth/v1` (send the anon key as `apikey`):
+
+| Endpoint | Body | Returns |
+|---|---|---|
+| `POST /auth/v1/signup` | `{"email", "password"}` | 201 with `access_token`, `refresh_token`, `expires_in`, `user` |
+| `POST /auth/v1/login` | `{"email", "password"}` | 200, same shape |
+| `POST /auth/v1/refresh` | `{"refresh_token"}` | 200, same shape; the old refresh token stops working |
+| `POST /auth/v1/logout` | `{"refresh_token"}` | 204 |
+| `GET /auth/v1/me` | (access token) | `{"id", "email"}` |
+
+Send `Authorization: Bearer <access_token>` together with the anon key to act as that user. The
+access token lasts one hour; use the refresh token to get a new pair. Every project has a built-in
+`users` table (`id`, `email`) that other tables can reference.
+
+```bash
+TOKEN=$(curl -s -X POST "$URL/auth/v1/login" -H "apikey: $ANON_KEY" -H "Content-Type: application/json" \
+  -d '{"email": "ada@example.com", "password": "a long password"}' | jq -r .access_token)
+
+# With an owner rule on notes.owner_id, this returns only Ada's notes, and owner_id fills itself in on insert
+curl "$URL/api/v1/notes" -H "apikey: $ANON_KEY" -H "Authorization: Bearer $TOKEN"
+curl -X POST "$URL/api/v1/notes" -H "apikey: $ANON_KEY" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"title": "mine"}'
+```
 
 ### Query parameters (GET)
 
@@ -116,7 +156,8 @@ Every error has the same shape:
 | 400 | `invalid_body` | Body is not an object or non-empty array of objects; unknown or read-only field; rows with different fields |
 | 400 | `invalid_value` | A value does not fit the column type (Postgres rejected it) |
 | 401 | `unauthorized` | Missing or invalid `apikey` header |
-| 403 | `forbidden` | The key's role is not allowed to do this on the table |
+| 401 | `invalid_token` | An access token was sent but is invalid or expired |
+| 403 | `forbidden` | A permission rule refused the write. (Reads never return 403: rows you may not see are simply absent.) |
 | 404 | `not_found` | No table with that name |
 | 409 | `constraint_violation` | Not null, unique or foreign key rule broken |
 | 503 | `timeout` | The query ran longer than the statement timeout (3 seconds by default) |

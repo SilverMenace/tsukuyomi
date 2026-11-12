@@ -134,7 +134,32 @@ Things to notice: the table aliases are `t0` (posts) and `t1` (authors), and `e1
 row; `id` is appended to `order by` so the order is total; the author comes back as a nested JSON
 object because Postgres builds it in the sub-select.
 
+## Who is asking: from headers to a Postgres role
+
+```mermaid
+flowchart LR
+    K[apikey header] --> F[ApiKeyFilter]
+    T[Authorization: Bearer token] --> F
+    F -->|service key| S[TenantIdentity SERVICE]
+    F -->|anon key, no token| A[TenantIdentity ANON]
+    F -->|anon key + valid token| U[TenantIdentity USER + user id]
+    F -->|anon key + bad token| X[401 invalid_token]
+    S --> TT[TenantTransaction]
+    A --> TT
+    U --> TT
+    TT -->|SET LOCAL ROLE p_x_service| P[(PostgreSQL)]
+    TT -->|SET LOCAL ROLE p_x_anon| P
+    TT -->|"SET LOCAL ROLE p_x_user + tsk.user_id"| P
+```
+
+Inside Postgres, every table has row-level security forced on. A rule set in the dashboard is a
+policy such as `USING (owner_id = tsk.uid())` for the `p_x_user` role; `tsk.uid()` reads the
+transaction-local `tsk.user_id`. The API code never adds an ownership filter itself.
+
+Login (`POST /auth/v1/login`): `ApiKeyFilter` identifies the project, `AuthService` checks the
+BCrypt hash in `tsk_platform.end_user`, then issues a JWT signed with the project's secret
+(`JwtCodec`) and a single-use refresh token stored as a hash.
+
 ## Coming next
 
-- M3: end-user tokens add a `USER` identity; rules become row-level security policies.
 - M4: live-update subscription (trigger → outbox → NOTIFY → listener → WebSocket).

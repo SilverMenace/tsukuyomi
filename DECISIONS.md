@@ -282,3 +282,93 @@ Newest milestones are at the bottom. Each entry is written so you can answer
   rows by 100, so three levels could be 100 x 100 x 100 = one million rows from one URL. The
   validator adds up the worst case across all levels and refuses anything over 25,000 before it
   runs. (This gap was caught by an automated security review of the first version.)
+
+---
+
+## M3 — end-user auth and permission rules
+
+### D25. Rules are Postgres row-level security policies, not checks in Java
+
+- **Question:** where is "users can only read rows they own" enforced?
+- **Options:**
+  1. *In the API:* add `WHERE owner_id = ?` to every generated query. Simple, but one forgotten
+     code path (an expansion, a new endpoint, the realtime feed) leaks data.
+  2. *In the database:* each rule becomes a `CREATE POLICY`. Postgres applies it to every row of
+     every statement, including sub-selects, whatever SQL arrives.
+- **Choice:** option 2. The API layer does not contain a single ownership check.
+- **How a rule maps to a policy:**
+
+  | Rule | Policy is for roles | Condition |
+  |---|---|---|
+  | nobody | (no policy) | row-level security denies by default |
+  | anyone | anon, user | `true` |
+  | authenticated | user | `true` |
+  | owner | user | `<column> = tsk.uid()` |
+
+  `USING` filters which existing rows an operation can see; `WITH CHECK` validates the new version
+  of a written row. That second part is what stops a user inserting a row "owned" by someone else,
+  or handing their row to another user.
+- **Rules are structured data**, never SQL text, so there is no injection path through a rule.
+- **Trade-off:** only four rule shapes in v1 (no custom expressions). A write returns the written
+  row, so a table you can insert into but not read from is not supported yet.
+
+### D26. Who the caller is: two headers, decided in one place
+
+- `apikey` says which project and whether the caller is the public app (anon) or trusted server
+  code (service). An optional `Authorization: Bearer <token>` says which end user.
+- `ApiKeyFilter` turns those into a `TenantIdentity`; `TenantTransaction` turns that into
+  `SET LOCAL ROLE` plus `tsk.user_id`. Nothing in the path, query or body can influence it.
+- **An invalid token is a 401, not "treat as anonymous".** Silently downgrading would make a client
+  with an expired token see an empty list and believe there is no data.
+
+### D27. What the database-level guarantee covers, and what it does not
+
+This is the answer to "can a bug in your API leak data?", and the honest version has two halves.
+
+- **Covered: wrong queries.** A missing filter, the wrong table, an expansion that forgot a check,
+  a new endpoint written carelessly. `AuthAndRulesTest.aBrokenApiLayerStillCannotLeak…` runs
+  filter-less `SELECT`, `UPDATE` and `DELETE` as a user and other users' rows are untouched.
+  Password hashes and all platform tables are unreadable from every tenant role, including service.
+- **Not covered: arbitrary SQL execution.** The data plane logs in as `tsk_api`, which may switch
+  into any project role. A second `SET ROLE` is just another statement, so if an attacker could
+  run SQL of their choosing they could switch to a service role. Postgres has no way for a session
+  to give up that ability. `knownLimitArbitrarySqlCouldSwitchRole` states this as a test.
+- **So two independent defences each cover one half:** the query compiler guarantees no request
+  text becomes SQL (D18, D19); row-level security guarantees that the SQL we do generate cannot
+  cross users or projects.
+- **This is the same model as PostgREST and Supabase** (their `authenticator` role can switch to
+  any role).
+- **How to close the gap, and why not now:** give each project its own login role and connection
+  pool, so the role a connection can become is limited to one project. That costs a pool per
+  project, which a free database with a small connection limit cannot afford.
+
+### D28. JWT for end users, written by hand; opaque tokens for refresh
+
+- **Why JWT here but a session table for the dashboard (D9):** end-user requests are the hot path.
+  A signed token is verified with one HMAC and no database lookup.
+- **Why hand-written:** it is about 100 lines, and the three classic mistakes are each visible as a
+  line of code and a test: the algorithm is fixed by us and never read from the token (`alg: none`
+  attack), the signature comparison is constant-time, and the payload is only parsed after the
+  signature is verified.
+- **Per-project secret, and the project id inside the token:** a token from one project fails in
+  another even if secrets were ever shared.
+- **Short access token (1 hour) + single-use refresh token (30 days, stored hashed):** a stolen
+  access token expires quickly; a refresh token can be revoked because it is a row. Using one
+  deletes it in the same statement that reads it, so two racing requests cannot both succeed.
+- **Trade-off:** an access token stays valid until it expires, even after logout or deletion.
+
+### D29. Profiles in the project, credentials in the platform
+
+- Each project has a built-in `users` table (id, email) inside its own schema, so the owner's tables
+  can reference users and rules can say "owner". Password hashes are in `tsk_platform.end_user`.
+- **Why split:** the project's tables are reachable through the data API by design; credentials must
+  not be reachable by any tenant role under any rule the owner could configure.
+- Tenant roles get `SELECT` and `UPDATE` on `users`, never `INSERT` or `DELETE`: rows come from
+  signup only.
+
+### D30. CORS open for the public API, closed for the dashboard API
+
+- `/api` and `/auth` answer any origin: apps built on a project run on their own domains.
+  That is safe because these endpoints never read a cookie, so a foreign page cannot borrow a
+  visitor's login; it can only use keys and tokens it already has.
+- `/platform` (cookie session) sends no CORS headers, so only the dashboard's own origin can call it.

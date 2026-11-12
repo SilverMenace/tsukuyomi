@@ -156,9 +156,13 @@ RLS is `ENABLE`d and `FORCE`d on every table, so the default with no rules is **
 Rules are structured data, never raw SQL, so there is no injection path through a rule.
 The `service` key maps to `p_x_service`, which gets an allow-all policy (for server-side use only).
 
-**What a bug can still do, honestly:** if the gateway resolved the wrong project from an API key, it would
-enter the wrong project's role. That mapping is one small, heavily tested function. Any bug *after* that
-point (in the query compiler, filters, expansion, realtime) is contained by Postgres.
+**What a bug can still do, honestly** (measured in M3, see `DECISIONS.md` D27):
+
+- A *wrong query* (missing filter, wrong table, careless new endpoint) is contained by Postgres.
+- If the gateway resolved the wrong project from an API key, it would enter the wrong project's
+  role. That mapping is one small, heavily tested function.
+- *Arbitrary SQL execution* is not contained by roles: the login role may switch into any project
+  role, so injected SQL could switch too. Preventing that is the query compiler's job (section 6).
 
 **Tests:** user A reads/updates/deletes user B's rows; anon writes; project A's key against project B's
 tables; forged and expired JWTs; JWT from project A used on project B; a deliberately broken compiler
