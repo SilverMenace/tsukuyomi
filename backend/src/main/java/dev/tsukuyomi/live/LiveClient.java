@@ -37,7 +37,11 @@ final class LiveClient {
 	/** By table name. Touched only by LiveHub's dispatcher thread. */
 	final Map<String, LiveHub.Subscription> subscriptions = new HashMap<>();
 
+	/** The address the connection came from, for the per-address limit. */
+	final String address;
+
 	LiveClient(WebSocketSession session, ObjectMapper json) {
+		this.address = String.valueOf(session.getAttributes().get(LiveConfig.ADDRESS));
 		// The decorator makes sending safe from several threads (the dispatcher
 		// sends events while a request thread may send an error).
 		this.session = new ConcurrentWebSocketSessionDecorator(session, SEND_TIME_LIMIT_MS, SEND_BUFFER_BYTES);

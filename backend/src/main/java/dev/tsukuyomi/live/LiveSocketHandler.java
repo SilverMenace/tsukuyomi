@@ -16,6 +16,7 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
@@ -58,6 +59,8 @@ class LiveSocketHandler extends TextWebSocketHandler implements DisposableBean {
 	private final ScheduledExecutorService timer = Executors
 		.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("live-timer").daemon().factory());
 
+	private final int maxPerAddress;
+
 	private final LiveHub hub;
 
 	private final IdentityResolver identities;
@@ -66,7 +69,9 @@ class LiveSocketHandler extends TextWebSocketHandler implements DisposableBean {
 
 	private final ObjectMapper json;
 
-	LiveSocketHandler(LiveHub hub, IdentityResolver identities, CatalogService catalogs, ObjectMapper json) {
+	LiveSocketHandler(LiveHub hub, IdentityResolver identities, CatalogService catalogs, ObjectMapper json,
+			@Value("${tsukuyomi.live.connections-per-address:20}") int maxPerAddress) {
+		this.maxPerAddress = maxPerAddress;
 		this.hub = hub;
 		this.identities = identities;
 		this.catalogs = catalogs;
@@ -79,7 +84,10 @@ class LiveSocketHandler extends TextWebSocketHandler implements DisposableBean {
 	public void afterConnectionEstablished(WebSocketSession session) {
 		session.setTextMessageSizeLimit(MAX_MESSAGE_BYTES);
 		LiveClient client = new LiveClient(session, json);
-		if (clients.size() >= MAX_CONNECTIONS) {
+		// Counted before authentication, so one machine cannot fill the server
+		// with connections that never say who they are.
+		long sameAddress = clients.values().stream().filter(c -> c.address.equals(client.address)).count();
+		if (clients.size() >= MAX_CONNECTIONS || sameAddress >= maxPerAddress) {
 			client.close(TOO_MANY);
 			return;
 		}
