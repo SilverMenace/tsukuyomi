@@ -38,13 +38,14 @@ public class MigrationService {
 	MigrationService(CatalogRepository repository, CatalogService catalogs, JdbcTemplate jdbc,
 			TransactionTemplate transaction, ObjectMapper json,
 			@Value("${tsukuyomi.quota.tables-per-project:15}") int maxTables,
-			@Value("${tsukuyomi.quota.columns-per-table:30}") int maxColumns) {
+			@Value("${tsukuyomi.quota.columns-per-table:30}") int maxColumns,
+			@Value("${tsukuyomi.quota.rows-per-table:10000}") int maxRows) {
 		this.repository = repository;
 		this.catalogs = catalogs;
 		this.jdbc = jdbc;
 		this.transaction = transaction;
 		this.json = json;
-		this.planner = new MigrationPlanner(maxTables, maxColumns);
+		this.planner = new MigrationPlanner(maxTables, maxColumns, maxRows);
 	}
 
 	/**

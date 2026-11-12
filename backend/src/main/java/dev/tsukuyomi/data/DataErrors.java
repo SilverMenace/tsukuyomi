@@ -3,6 +3,7 @@ package dev.tsukuyomi.data;
 import java.sql.SQLException;
 
 import dev.tsukuyomi.common.ApiException;
+import dev.tsukuyomi.schema.RowQuota;
 
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
@@ -38,6 +39,9 @@ final class DataErrors {
 		}
 		if (state.startsWith("22")) { // data exception: value does not fit the column type
 			return ApiException.badRequest("invalid_value", message);
+		}
+		if (state.equals(RowQuota.SQL_STATE)) { // raised by our own quota trigger
+			return ApiException.conflict("quota_rows", message);
 		}
 		if (state.startsWith("23")) { // integrity constraint: not null, unique, foreign key
 			return ApiException.conflict("constraint_violation", message);

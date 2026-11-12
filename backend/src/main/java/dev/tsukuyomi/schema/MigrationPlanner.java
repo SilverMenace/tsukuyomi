@@ -48,9 +48,12 @@ public final class MigrationPlanner {
 
 	private final int maxColumns;
 
-	public MigrationPlanner(int maxTables, int maxColumns) {
+	private final int maxRows;
+
+	public MigrationPlanner(int maxTables, int maxColumns, int maxRows) {
 		this.maxTables = maxTables;
 		this.maxColumns = maxColumns;
+		this.maxRows = maxRows;
 	}
 
 	public Plan plan(ProjectRef project, Catalog current, List<SchemaOperation> operations) {
@@ -119,6 +122,8 @@ public final class MigrationPlanner {
 				+ quote(project.roleName(TenantRole.SERVICE)) + " using (true) with check (true)");
 		// Live updates: record every row change (see ChangeTrigger).
 		out.add(ChangeTrigger.statement(table));
+		// And refuse inserts beyond the row quota (see RowQuota).
+		out.add(RowQuota.statement(table, maxRows));
 
 		return catalog.withTable(new TableDef(op.table(), columns));
 	}

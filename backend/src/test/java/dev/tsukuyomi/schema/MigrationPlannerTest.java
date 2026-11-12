@@ -28,7 +28,7 @@ class MigrationPlannerTest {
 
 	private final ProjectRef project = new ProjectRef(UUID.randomUUID(), "p_0123456789ab");
 
-	private final MigrationPlanner planner = new MigrationPlanner(3, 5);
+	private final MigrationPlanner planner = new MigrationPlanner(3, 5, 1000);
 
 	private static ColumnSpec column(String name, ColumnType type) {
 		return new ColumnSpec(name, type, null, null);
@@ -40,7 +40,7 @@ class MigrationPlannerTest {
 				List.of(new ColumnSpec("title", ColumnType.TEXT, false, null),
 						new ColumnSpec("slug", ColumnType.TEXT, null, true)))));
 
-		assertThat(plan.statements()).hasSize(6);
+		assertThat(plan.statements()).hasSize(7);
 		assertThat(plan.statements().get(0)).startsWith("create table \"p_0123456789ab\".\"notes\"")
 			.contains("\"id\" uuid primary key default uuidv7()")
 			.contains("\"title\" text not null")
