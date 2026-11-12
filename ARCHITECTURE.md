@@ -1,9 +1,120 @@
 # Architecture
 
-How a request travels through the system. This file grows with each milestone; a section is only
-written once the code for it exists, so everything here can be checked against the source.
+How the system is put together and how a request travels through it. Every section describes code
+that exists; file names are given so each claim can be checked against the source. The reasons
+behind the choices are in `DECISIONS.md`.
 
-For the intended end state, see the diagram in `PLAN.md` section 1.
+## The whole system in one picture
+
+```mermaid
+flowchart LR
+    subgraph Browser
+        DASH[Dashboard<br/>React + TypeScript]
+        DEMO[Demo app<br/>static site + sdk/]
+    end
+
+    subgraph Backend["Backend: one Spring Boot app (Java 21)"]
+        RL[RateLimitFilter]
+        CP[Control plane<br/>accounts, projects, keys,<br/>schema designer, rules]
+        MIG[MigrationPlanner<br/>operations to DDL]
+        ID[IdentityResolver<br/>API key + token to identity]
+        QC[Query compiler<br/>URL to AST to SQL + binds]
+        TT[TenantTransaction<br/>SET LOCAL ROLE + user id]
+        HUB[LiveHub<br/>WebSocket subscribers]
+        LS[ChangeListener<br/>LISTEN on one connection]
+    end
+
+    subgraph PG["PostgreSQL (one database)"]
+        PLAT[(schema tsk_platform<br/>accounts, projects, catalog,<br/>migrations, credentials, change log)]
+        PA[(schema p_ab12...<br/>project A tables + policies)]
+        PB[(schema p_cd34...<br/>project B tables + policies)]
+    end
+
+    DASH -->|cookie session| RL --> CP
+    CP --> MIG --> PA
+    CP --> PLAT
+    DEMO -->|REST + API key + user token| RL
+    RL --> ID --> QC --> TT --> PA
+    DEMO <-->|WebSocket| HUB
+    PA -. trigger: record + NOTIFY .-> LS --> HUB
+    HUB -->|read the row as each subscriber| TT
+```
+
+Two halves, and the split matters:
+
+- **Control plane**: what a project's owner uses through the dashboard. It runs DDL and connects
+  to Postgres as the owner role.
+- **Data plane**: what apps built on a project use (REST and WebSocket). It connects as a login
+  role with **no privileges of its own**, and can only act by switching into one project's role
+  for one transaction.
+
+## Stack
+
+| Piece | Choice | Why |
+|---|---|---|
+| Backend | Java 21, Spring Boot 4.1 (Web MVC, Security, WebSocket), Maven wrapper | Blocking MVC code is easier to read and debug than reactive code; virtual threads give the concurrency. |
+| Database access | `JdbcTemplate` and a hand-written SQL builder, no ORM | Tables are created at runtime by users; an ORM needs classes known at compile time. |
+| Database | PostgreSQL 18 | Row-level security, transactional DDL, schemas, roles and LISTEN/NOTIFY: each hard feature leans on something Postgres already does well. |
+| Platform tables | Flyway migrations (`V1` to `V6`) | The standard tool for our own tables. Project tables use our own migration engine. |
+| Dashboard | React, TypeScript, Vite, TanStack Query, plain CSS | Built into the Spring Boot jar: one deploy, one URL. |
+| SDK and demo | TypeScript, no dependencies; React for the demo | The demo talks only through the SDK, which is the proof of "no backend code". |
+| Tests | JUnit, AssertJ, Testcontainers (a real PostgreSQL), Node's test runner for the SDK | Injection and permission tests mean something only against a real database. |
+| Hosting | Render free web service, Neon free PostgreSQL, GitHub Pages, GitHub Actions | No cost and no card. The price is sleep after idle time (see README). |
+
+Repository layout:
+
+```
+backend/     the Spring Boot app, one package per feature:
+             platform/ (accounts, projects, keys)   tenancy/ (roles, the tenant transaction)
+             schema/ (catalog, migrations)          query/ (the compiler)
+             data/ (REST endpoints)                 auth/ (end users, tokens)
+             live/ (live updates)                   common/ (errors, security, limits)
+dashboard/   the React dashboard (built into the backend jar)
+sdk/         the TypeScript client
+demo/        the demo app (published to GitHub Pages)
+scripts/     local database, demo project setup, benchmark
+```
+
+## Data model
+
+The platform's own tables live in the schema `tsk_platform`, which no project role can read.
+
+```mermaid
+erDiagram
+    account ||--o{ session : "dashboard logins"
+    account ||--o{ project : owns
+    project ||--o{ api_key : "anon + service"
+    project ||--o{ migration : "history"
+    project ||--o{ table_meta : contains
+    table_meta ||--o{ column_meta : has
+    table_meta ||--o{ rule : "one per operation"
+    project ||--o{ end_user : "password hashes"
+    end_user ||--o{ end_user_session : "refresh tokens"
+
+    account { uuid id  text email  text password_hash }
+    session { text token_hash  uuid account_id  timestamptz expires_at }
+    project { uuid id  uuid account_id  text name  text schema_name  bytea jwt_secret  int schema_version }
+    api_key { uuid project_id  text kind  text key_hash  text prefix }
+    migration { uuid project_id  int version  jsonb operations  text sql }
+    table_meta { uuid id  uuid project_id  text name  bool builtin }
+    column_meta { uuid table_id  text name  text type  bool nullable  bool is_unique  text ref_table  text on_delete }
+    rule { uuid table_id  text operation  text kind  text owner_column }
+    end_user { uuid project_id  uuid user_id  text email  text password_hash }
+    end_user_session { text token_hash  uuid user_id  timestamptz expires_at }
+```
+
+Two more tables there belong to live updates: `change_event` (the log of row changes) and
+`change_floor` (how far that log has been trimmed).
+
+`table_meta`, `column_meta` and `rule` are **the catalog**. The query compiler never trusts a name
+from a request; it looks the name up in the catalog and uses the catalog's copy.
+
+Each project has its own schema `p_<12 hex characters>` holding:
+
+- a built-in `users` table (`id`, `email`, `created_at`): the public profile of each end user, so
+  the owner's tables can reference it. Password hashes are not here;
+- the tables the owner designs. Every table gets an `id uuid` primary key and `created_at`, row-level
+  security forced on, a trigger that records changes and a trigger that enforces the row quota.
 
 ## Health check and deny-by-default
 
@@ -224,3 +335,34 @@ The demo has no server of its own. Its whole backend is two tables and their rul
 that key and each logged-in user may do. `sdk/src/query.ts` builds the URLs described in the
 README, `sdk/src/auth.ts` keeps the login fresh, and `sdk/src/live.ts` is the client half of the
 live-update flow above (reconnect, cursor, repeated events).
+
+## Limits: what stops one caller from taking the server
+
+```mermaid
+flowchart LR
+    R[request] --> A{declared body<br/>over 1 MB?}
+    A -->|yes| X1[413 too_large]
+    A -->|no| B{credentials endpoint?<br/>10 per minute per address}
+    B -->|over| X2[429 rate_limited]
+    B --> C{per address<br/>20 per second, burst 100}
+    C -->|over| X2
+    C --> D{per API key<br/>50 per second, burst 200}
+    D -->|over| X2
+    D --> S[security filters, then the handler]
+```
+
+`common/limit/RateLimitFilter.java` runs before everything else, so a refused request costs no
+database query and no password hash. Each limit is a token bucket (`TokenBucket.java`) kept in
+memory. The caller's address is read from `X-Forwarded-For` counting from the right
+(`ClientAddress.java`), because the left side of that header is written by the client.
+
+Limits enforced elsewhere:
+
+| Limit | Value | Where |
+|---|---|---|
+| Rows per table | 10,000 | trigger `tsk.enforce_row_quota` (`V5`, `V6`) |
+| Tables per project, columns per table | 15, 30 | `MigrationPlanner` |
+| Projects per account, end users per project | 3, 1,000 | `ProjectService`, `AuthService` |
+| Page size, expansion depth, total rows per query | 100, 2, 25,000 | `QueryLimits` |
+| Statement time | 3 seconds | `TenantTransaction` (`SET LOCAL statement_timeout`) |
+| Live connections | 300 per server, 100 per project, 20 per address | `LiveSocketHandler` |

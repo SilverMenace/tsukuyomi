@@ -583,3 +583,71 @@ Three cases end with a `resync` message (or `"resync": true` in the answer to `s
   limits (M7) bound the damage; they do not prevent it.
 - The anon key is committed in `demo/src/config.ts` on purpose. It is the public half of the
   design: it identifies the project, and the rules decide what it may do.
+
+## M7 — limits and measurements
+
+### D45. Rate limiting: token buckets in memory, before everything else
+
+- **Algorithm:** a token bucket per caller. It allows a burst (a page that loads ten things at
+  once) and then a steady rate. A fixed window ("100 per minute") is simpler but lets a caller
+  send 100 at 0:59 and 100 at 1:01; a sliding log is exact but stores every request time.
+- **Three buckets:** per address for signup and login (10 per minute: each attempt costs a
+  deliberately slow password hash, and this is where passwords are guessed); per address for
+  everything (20 per second); per API key (50 per second, so one project cannot starve the rest
+  however many machines its users have).
+- **Where:** a servlet filter ordered before Spring Security, so a refused request does no
+  database lookup. Because it runs before the CORS filter, it adds the CORS header to its own
+  429 answers; otherwise a browser app would see a network error instead of the message.
+- **In memory:** counts are per server instance and reset on restart. Right for one instance
+  with no extra service to run or pay for. Several instances would need a shared store.
+- **Honest limits:** people behind one shared address share a bucket. An attacker with many
+  addresses is slowed per address only; the per-key limit then caps the project as a whole.
+
+### D46. The caller's address is counted from the right of X-Forwarded-For
+
+- Each proxy appends the address it received the request from. Everything to the left of what
+  our own host's proxy wrote can be invented by the client. Taking the first entry, which many
+  examples do, lets anyone reset their rate limit by sending a different fake header each time.
+- `tsukuyomi.rate-limit.trusted-proxies` says how many proxies in front of the app are trusted;
+  the caller is that many entries from the right. **Checked on the live host:** with the value
+  1, the 429 message named my real address even when I sent a forged header.
+- Two things a security review caught in the first version: a client can send the header as
+  several lines (now joined before counting), and a path such as `/auth/v1/lo%67in` is routed to
+  the login handler but did not equal `/auth/v1/login` as text (the filter now compares the
+  decoded path, the same one the router uses). Each has a test in `LimitsTest`.
+
+### D47. The row quota is a trigger, with a lock
+
+- **Why a trigger, not a check in Java:** the same reason as rules (D25). Rows can be inserted
+  through any code path; the database is the one place they all pass. It also has to count rows
+  the inserting user is not allowed to see, which the API's own connection cannot.
+- **Cheap count:** `select count(*) from (select 1 from t limit quota + 1)` stops counting at
+  the quota, so the cost does not grow past 10,000 rows. It runs once per statement, so a batch
+  of 100 rows costs one count.
+- **The race:** two inserts at the same moment each counted without seeing the other's rows,
+  and both passed. A security review found this. The trigger now takes a per-table advisory lock
+  (`pg_advisory_xact_lock`) held until commit; `LimitsTest.theRowQuotaHoldsUnderConcurrentInserts`
+  sends ten inserts at once into a table with room for two and exactly two succeed.
+- **Cost of the lock:** inserts into the same table commit one after another. Requests here are
+  one short statement each, so the wait is small (see the insert numbers in the README), but a
+  long-running insert would hold up the others until the 3-second statement timeout. Updates,
+  deletes and other tables are not affected.
+- **Alternative:** a counter row per table updated on insert and delete. Exact and O(1), but
+  every insert and delete then writes the same row, which is the same queue with more parts.
+
+### D48. Request bodies are limited by what is read, not by what is declared
+
+- The declared `Content-Length` is checked first (413). But a body can be sent in chunks with no
+  length at all, so the request is also wrapped in `LimitedBodyRequest`, which counts bytes as
+  they are read and fails past 1 MB. Found by a security review; tested with a chunked upload.
+
+### D49. What the numbers in the README mean
+
+- **Local numbers** (`scripts/bench.mjs`) measure the software: one laptop runs the load
+  generator, the server and PostgreSQL, with 16 requests in flight and rate limits off. They
+  say "the code is not the bottleneck at this scale", not "production handles this".
+- **Live numbers** measure the free deployment from one place (India to Singapore), one request
+  at a time, inside the rate limits. The health check, which touches no database, shows how much
+  of each figure is network distance.
+- Not measured: many concurrent users on the live host (it would mean attacking a free tier),
+  tables larger than the 10,000-row quota, and behaviour with the database far from the server.

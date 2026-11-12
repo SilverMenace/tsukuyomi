@@ -12,7 +12,7 @@ import org.postgresql.PGConnection;
 import org.postgresql.PGNotification;
 
 /**
- * Spike: does the hosted Postgres allow the isolation design in PLAN.md section 4 and 7?
+ * Spike: does the hosted Postgres allow the isolation and live-update design (DECISIONS.md D3, D4, D31)?
  *
  * It is a throwaway experiment, kept in the repo because DECISIONS.md refers to its result.
  * It creates two temporary roles and one temporary schema, checks each assumption, and
