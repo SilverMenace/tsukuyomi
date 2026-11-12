@@ -15,7 +15,7 @@ import org.springframework.stereotype.Repository;
 public class ProjectRepository {
 
 	/** What an API key resolves to. */
-	public record KeyOwner(ProjectRef project, TenantRole role) {
+	public record KeyOwner(ProjectRef project, TenantRole role, byte[] jwtSecret) {
 	}
 
 	private static final RowMapper<Project> PROJECT = (rs, n) -> new Project(rs.getObject("id", UUID.class),
@@ -46,6 +46,15 @@ public class ProjectRepository {
 	 */
 	void lockAccount(UUID accountId) {
 		jdbc.queryForObject("select id from tsk_platform.account where id = ? for update", UUID.class, accountId);
+	}
+
+	/** Locks the project row until the surrounding transaction ends. */
+	public void lockProject(UUID projectId) {
+		jdbc.queryForObject("select id from tsk_platform.project where id = ? for update", UUID.class, projectId);
+	}
+
+	public byte[] findJwtSecret(UUID projectId) {
+		return jdbc.queryForObject("select jwt_secret from tsk_platform.project where id = ?", byte[].class, projectId);
 	}
 
 	int countByAccount(UUID accountId) {
@@ -87,11 +96,12 @@ public class ProjectRepository {
 
 	public Optional<KeyOwner> findKeyOwner(String keyHash) {
 		return jdbc.query("""
-				select p.id, p.schema_name, k.kind
+				select p.id, p.schema_name, p.jwt_secret, k.kind
 				from tsk_platform.api_key k join tsk_platform.project p on p.id = k.project_id
 				where k.key_hash = ?""",
 				(rs, n) -> new KeyOwner(new ProjectRef(rs.getObject("id", UUID.class), rs.getString("schema_name")),
-						"service".equals(rs.getString("kind")) ? TenantRole.SERVICE : TenantRole.ANON),
+						"service".equals(rs.getString("kind")) ? TenantRole.SERVICE : TenantRole.ANON,
+						rs.getBytes("jwt_secret")),
 				keyHash)
 			.stream()
 			.findFirst();

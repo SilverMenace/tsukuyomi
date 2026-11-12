@@ -5,6 +5,9 @@ import java.util.UUID;
 
 import dev.tsukuyomi.common.ApiException;
 import dev.tsukuyomi.common.Tokens;
+import dev.tsukuyomi.schema.BuiltinTables;
+import dev.tsukuyomi.schema.Catalog;
+import dev.tsukuyomi.schema.CatalogRepository;
 import dev.tsukuyomi.tenancy.ProjectRef;
 import dev.tsukuyomi.tenancy.TenantRole;
 import dev.tsukuyomi.tenancy.TenantTransaction;
@@ -24,15 +27,19 @@ public class ProjectService {
 
 	private final ProjectRepository projects;
 
+	private final CatalogRepository catalogs;
+
 	private final JdbcTemplate jdbc;
 
 	private final TransactionTemplate transaction;
 
 	private final int maxProjects;
 
-	ProjectService(ProjectRepository projects, JdbcTemplate jdbc, TransactionTemplate transaction,
+	ProjectService(ProjectRepository projects, CatalogRepository catalogs, JdbcTemplate jdbc,
+			TransactionTemplate transaction,
 			@Value("${tsukuyomi.quota.projects-per-account:3}") int maxProjects) {
 		this.projects = projects;
+		this.catalogs = catalogs;
 		this.jdbc = jdbc;
 		this.transaction = transaction;
 		this.maxProjects = maxProjects;
@@ -51,8 +58,8 @@ public class ProjectService {
 	}
 
 	/**
-	 * Creates the project row, its schema, its three roles and its two API keys
-	 * in one transaction. Postgres DDL is transactional, so if any step fails
+	 * Creates the project row, its schema, its three roles, its users table and
+	 * its two API keys in one transaction. Postgres DDL is transactional, so if any step fails
 	 * nothing is left behind: no orphan schema, no orphan role.
 	 */
 	public Created create(Account account, String rawName) {
@@ -79,6 +86,9 @@ public class ProjectService {
 				jdbc.execute("grant " + roleName + " to " + TenantTransaction.LOGIN_ROLE
 						+ " with inherit false, set true");
 			}
+			// Every project starts with a "users" table for its end users.
+			BuiltinTables.usersStatements(ref).forEach(jdbc::execute);
+			catalogs.replace(project.id(), new Catalog(0, List.of(BuiltinTables.users())));
 			return new Created(project, newKey(project.id(), TenantRole.ANON), newKey(project.id(), TenantRole.SERVICE));
 		});
 	}
