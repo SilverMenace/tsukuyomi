@@ -19,7 +19,8 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo;
 @JsonSubTypes({ @JsonSubTypes.Type(value = SchemaOperation.CreateTable.class, name = "create_table"),
 		@JsonSubTypes.Type(value = SchemaOperation.DropTable.class, name = "drop_table"),
 		@JsonSubTypes.Type(value = SchemaOperation.AddColumn.class, name = "add_column"),
-		@JsonSubTypes.Type(value = SchemaOperation.DropColumn.class, name = "drop_column") })
+		@JsonSubTypes.Type(value = SchemaOperation.DropColumn.class, name = "drop_column"),
+		@JsonSubTypes.Type(value = SchemaOperation.SetRule.class, name = "set_rule") })
 public sealed interface SchemaOperation {
 
 	/**
@@ -52,6 +53,14 @@ public sealed interface SchemaOperation {
 	}
 
 	record DropColumn(String table, String column) implements SchemaOperation {
+	}
+
+	/**
+	 * Sets who may perform one operation on a table.
+	 *
+	 * @param ownerColumn required for (and only for) the "owner" rule
+	 */
+	record SetRule(String table, RuleOperation operation, RuleKind rule, String ownerColumn) implements SchemaOperation {
 	}
 
 }

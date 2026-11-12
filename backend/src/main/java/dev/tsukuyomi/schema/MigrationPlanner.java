@@ -9,6 +9,7 @@ import dev.tsukuyomi.schema.SchemaOperation.ColumnSpec;
 import dev.tsukuyomi.schema.SchemaOperation.CreateTable;
 import dev.tsukuyomi.schema.SchemaOperation.DropColumn;
 import dev.tsukuyomi.schema.SchemaOperation.DropTable;
+import dev.tsukuyomi.schema.SchemaOperation.SetRule;
 import dev.tsukuyomi.tenancy.ProjectRef;
 import dev.tsukuyomi.tenancy.TenantRole;
 
@@ -61,6 +62,7 @@ public final class MigrationPlanner {
 				case DropTable op -> dropTable(project, catalog, op, statements);
 				case AddColumn op -> addColumn(project, catalog, op, statements);
 				case DropColumn op -> dropColumn(project, catalog, op, statements);
+				case SetRule op -> setRule(project, catalog, op, statements);
 			};
 		}
 		return new Plan(statements, catalog.withVersion(current.version() + 1));
@@ -111,6 +113,7 @@ public final class MigrationPlanner {
 
 	private Catalog dropTable(ProjectRef project, Catalog catalog, DropTable op, List<String> out) {
 		TableDef table = existingTable(catalog, op.table());
+		requireNotBuiltin(table, "removed");
 		for (TableDef other : catalog.tables()) {
 			for (ColumnDef column : other.columns()) {
 				if (!other.name().equals(table.name()) && table.name().equals(column.references())) {
@@ -129,6 +132,10 @@ public final class MigrationPlanner {
 			throw ApiException.badRequest("invalid_operation", "add_column needs a column");
 		}
 		ColumnDef column = newColumn(catalog, table.name(), table.columns(), op.column());
+		if (table.builtin() && !column.nullable()) {
+			// Signup creates the row with only an email, so extra profile columns must allow null.
+			throw ApiException.badRequest("invalid_column", "columns added to '" + table.name() + "' must be nullable");
+		}
 		out.add("alter table " + qualified(project, table.name()) + " add column "
 				+ columnSql(project, table.name(), column));
 		if (column.isReference()) {
@@ -136,7 +143,7 @@ public final class MigrationPlanner {
 		}
 		List<ColumnDef> columns = new ArrayList<>(table.columns());
 		columns.add(column);
-		return catalog.withTable(new TableDef(table.name(), columns));
+		return catalog.withTable(table.withColumns(columns));
 	}
 
 	private Catalog dropColumn(ProjectRef project, Catalog catalog, DropColumn op, List<String> out) {
@@ -147,10 +154,85 @@ public final class MigrationPlanner {
 		if (column.system()) {
 			throw ApiException.badRequest("system_column", "column '" + column.name() + "' cannot be removed");
 		}
+		table.rules().forEach((operation, rule) -> {
+			if (column.name().equals(rule.ownerColumn())) {
+				throw ApiException.conflict("column_in_rule", "the " + operation.sql() + " rule of '" + table.name()
+						+ "' uses column '" + column.name() + "'; change the rule first");
+			}
+		});
 		out.add("alter table " + qualified(project, table.name()) + " drop column " + quote(column.name()));
 		List<ColumnDef> columns = new ArrayList<>(table.columns());
 		columns.remove(column);
-		return catalog.withTable(new TableDef(table.name(), columns));
+		return catalog.withTable(table.withColumns(columns));
+	}
+
+	/**
+	 * A rule becomes a Postgres row-level security policy. The policy is what
+	 * actually enforces it: the database checks it on every row, for every
+	 * query, whatever the API code does.
+	 *
+	 *   anyone         policy for the anon and user roles, condition "true"
+	 *   authenticated  policy for the user role only, condition "true"
+	 *   owner          policy for the user role, condition "<column> = tsk.uid()"
+	 *   nobody         no policy at all (row-level security denies by default)
+	 *
+	 * USING filters which existing rows are visible to the operation; WITH CHECK
+	 * validates the new version of a row being written.
+	 */
+	private Catalog setRule(ProjectRef project, Catalog catalog, SetRule op, List<String> out) {
+		TableDef table = existingTable(catalog, op.table());
+		if (op.operation() == null || op.rule() == null) {
+			throw ApiException.badRequest("invalid_rule", "set_rule needs an operation and a rule");
+		}
+		if (table.builtin() && (op.operation() == RuleOperation.INSERT || op.operation() == RuleOperation.DELETE)
+				&& op.rule() != RuleKind.NOBODY) {
+			throw ApiException.badRequest("invalid_rule",
+					"rows of '" + table.name() + "' are created by signup only; insert and delete stay closed");
+		}
+		String condition = "true";
+		String owner = null;
+		if (op.rule() == RuleKind.OWNER) {
+			ColumnDef column = table.column(op.ownerColumn() == null ? "" : op.ownerColumn())
+				.orElseThrow(() -> ApiException.badRequest("invalid_rule",
+						"an owner rule needs ownerColumn, a uuid column of '" + table.name() + "'"));
+			if (column.type() != ColumnType.UUID) {
+				throw ApiException.badRequest("invalid_rule", "the owner column must be of type uuid");
+			}
+			owner = column.name();
+			condition = quote(owner) + " = tsk.uid()";
+		}
+		else if (op.ownerColumn() != null) {
+			throw ApiException.badRequest("invalid_rule", "ownerColumn only applies to the owner rule");
+		}
+
+		String target = qualified(project, table.name());
+		String policy = "\"rule_" + op.operation().sql() + "\"";
+		out.add("drop policy if exists " + policy + " on " + target);
+		if (op.rule() != RuleKind.NOBODY) {
+			String roles = quote(project.roleName(TenantRole.USER));
+			if (op.rule() == RuleKind.ANYONE) {
+				roles = quote(project.roleName(TenantRole.ANON)) + ", " + roles;
+			}
+			String clause = switch (op.operation()) {
+				case SELECT, DELETE -> " using (" + condition + ")";
+				case INSERT -> " with check (" + condition + ")";
+				case UPDATE -> " using (" + condition + ") with check (" + condition + ")";
+			};
+			out.add("create policy " + policy + " on " + target + " for " + op.operation().sql() + " to " + roles
+					+ clause);
+			if (owner != null && !Identifiers.SYSTEM_COLUMNS.contains(owner)) {
+				// Convenience: a client inserting a row need not send its own id;
+				// the column fills itself with the caller's id.
+				out.add("alter table " + target + " alter column " + quote(owner) + " set default tsk.uid()");
+			}
+		}
+		return catalog.withTable(table.withRule(op.operation(), new Rule(op.rule(), owner)));
+	}
+
+	private static void requireNotBuiltin(TableDef table, String action) {
+		if (table.builtin()) {
+			throw ApiException.badRequest("builtin_table", "table '" + table.name() + "' is built in and cannot be " + action);
+		}
 	}
 
 	private ColumnDef newColumn(Catalog catalog, String table, List<ColumnDef> existing, ColumnSpec spec) {

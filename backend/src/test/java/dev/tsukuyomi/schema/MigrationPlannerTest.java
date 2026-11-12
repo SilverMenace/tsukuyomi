@@ -9,6 +9,7 @@ import dev.tsukuyomi.schema.SchemaOperation.ColumnSpec;
 import dev.tsukuyomi.schema.SchemaOperation.CreateTable;
 import dev.tsukuyomi.schema.SchemaOperation.DropColumn;
 import dev.tsukuyomi.schema.SchemaOperation.DropTable;
+import dev.tsukuyomi.schema.SchemaOperation.SetRule;
 import dev.tsukuyomi.tenancy.ProjectRef;
 
 import org.junit.jupiter.api.Test;
@@ -174,6 +175,76 @@ class MigrationPlannerTest {
 					List.of(new CreateTable("t", List.of(column(name, ColumnType.TEXT))))))
 				.hasMessageContaining("reserved");
 		}
+	}
+
+	@Test
+	void rulesBecomeRowLevelSecurityPolicies() {
+		Catalog start = new Catalog(0, List.of(BuiltinTables.users()));
+		var plan = planner.plan(project, start, List.of(
+				new CreateTable("notes", List.of(new ColumnSpec("owner_id", ColumnType.UUID, null, null, "users", null))),
+				new SetRule("notes", RuleOperation.SELECT, RuleKind.ANYONE, null),
+				new SetRule("notes", RuleOperation.INSERT, RuleKind.OWNER, "owner_id"),
+				new SetRule("notes", RuleOperation.UPDATE, RuleKind.OWNER, "owner_id"),
+				new SetRule("notes", RuleOperation.DELETE, RuleKind.AUTHENTICATED, null)));
+		String notes = "\"p_0123456789ab\".\"notes\"";
+
+		assertThat(plan.statements()).contains(
+				"drop policy if exists \"rule_select\" on " + notes,
+				"create policy \"rule_select\" on " + notes
+						+ " for select to \"p_0123456789ab_anon\", \"p_0123456789ab_user\" using (true)",
+				"create policy \"rule_insert\" on " + notes
+						+ " for insert to \"p_0123456789ab_user\" with check (\"owner_id\" = tsk.uid())",
+				"create policy \"rule_update\" on " + notes + " for update to \"p_0123456789ab_user\""
+						+ " using (\"owner_id\" = tsk.uid()) with check (\"owner_id\" = tsk.uid())",
+				"create policy \"rule_delete\" on " + notes + " for delete to \"p_0123456789ab_user\" using (true)",
+				"alter table " + notes + " alter column \"owner_id\" set default tsk.uid()");
+		TableDef table = plan.result().table("notes").orElseThrow();
+		assertThat(table.rule(RuleOperation.INSERT)).isEqualTo(new Rule(RuleKind.OWNER, "owner_id"));
+
+		// back to nobody: the policy is dropped and nothing replaces it
+		var closed = planner.plan(project, plan.result(), List.of(new SetRule("notes", RuleOperation.SELECT, RuleKind.NOBODY, null)));
+		assertThat(closed.statements()).containsExactly("drop policy if exists \"rule_select\" on " + notes);
+		assertThat(closed.result().table("notes").orElseThrow().rule(RuleOperation.SELECT)).isEqualTo(Rule.NOBODY);
+	}
+
+	@Test
+	void rejectsInvalidRulesAndProtectsTheUsersTable() {
+		Catalog start = planner.plan(project, new Catalog(0, List.of(BuiltinTables.users())), List.of(new CreateTable("notes",
+				List.of(column("title", ColumnType.TEXT), new ColumnSpec("owner_id", ColumnType.UUID, null, null, "users", null)))))
+			.result();
+
+		assertThatThrownBy(() -> planner.plan(project, start, List.of(new SetRule("notes", RuleOperation.SELECT, RuleKind.OWNER, null))))
+			.hasMessageContaining("needs ownerColumn");
+		assertThatThrownBy(() -> planner.plan(project, start, List.of(new SetRule("notes", RuleOperation.SELECT, RuleKind.OWNER, "title"))))
+			.hasMessageContaining("must be of type uuid");
+		assertThatThrownBy(() -> planner.plan(project, start,
+				List.of(new SetRule("notes", RuleOperation.SELECT, RuleKind.OWNER, "owner_id = tsk.uid() or true"))))
+			.hasMessageContaining("needs ownerColumn");
+		assertThatThrownBy(() -> planner.plan(project, start, List.of(new SetRule("notes", RuleOperation.SELECT, RuleKind.ANYONE, "owner_id"))))
+			.hasMessageContaining("only applies");
+		assertThatThrownBy(() -> planner.plan(project, start, List.of(new SetRule("nope", RuleOperation.SELECT, RuleKind.ANYONE, null))))
+			.hasMessageContaining("no table named");
+
+		assertThatThrownBy(() -> planner.plan(project, start, List.of(new DropTable("users")))).hasMessageContaining("built in");
+		assertThatThrownBy(() -> planner.plan(project, start, List.of(new SetRule("users", RuleOperation.DELETE, RuleKind.OWNER, "id"))))
+			.hasMessageContaining("signup only");
+		assertThatThrownBy(() -> planner.plan(project, start, List.of(new CreateTable("users", List.of()))))
+			.isInstanceOf(ApiException.class);
+		assertThatThrownBy(() -> planner.plan(project, start,
+				List.of(new AddColumn("users", new ColumnSpec("name", ColumnType.TEXT, false, null)))))
+			.hasMessageContaining("must be nullable");
+		// profile columns and a wider read rule on users are allowed
+		var profile = planner.plan(project, start, List.of(new AddColumn("users", column("name", ColumnType.TEXT)),
+				new SetRule("users", RuleOperation.SELECT, RuleKind.AUTHENTICATED, null),
+				new SetRule("users", RuleOperation.UPDATE, RuleKind.OWNER, "id")));
+		assertThat(profile.sql()).contains("for update to \"p_0123456789ab_user\" using (\"id\" = tsk.uid())")
+			.doesNotContain("alter column \"id\" set default");
+		assertThat(profile.result().table("users").orElseThrow().builtin()).isTrue();
+
+		// a column used by a rule cannot be dropped
+		Catalog ruled = planner.plan(project, start, List.of(new SetRule("notes", RuleOperation.SELECT, RuleKind.OWNER, "owner_id"))).result();
+		assertThatThrownBy(() -> planner.plan(project, ruled, List.of(new DropColumn("notes", "owner_id"))))
+			.hasMessageContaining("change the rule first");
 	}
 
 	@Test

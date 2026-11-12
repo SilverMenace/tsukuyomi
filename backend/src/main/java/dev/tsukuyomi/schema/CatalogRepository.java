@@ -11,9 +11,9 @@ import org.springframework.stereotype.Repository;
 
 /** Reads and writes the catalog tables (table_meta, column_meta) and the migration history. */
 @Repository
-class CatalogRepository {
+public class CatalogRepository {
 
-	record MigrationRecord(int version, String operations, String sql, java.time.Instant appliedAt) {
+	public record MigrationRecord(int version, String operations, String sql, java.time.Instant appliedAt) {
 	}
 
 	private final JdbcTemplate jdbc;
@@ -34,20 +34,36 @@ class CatalogRepository {
 	Catalog load(UUID projectId) {
 		Integer version = jdbc.queryForObject("select schema_version from tsk_platform.project where id = ?",
 				Integer.class, projectId);
-		Map<String, List<ColumnDef>> tables = new LinkedHashMap<>();
-		jdbc.query("select name from tsk_platform.table_meta where project_id = ? order by name",
-				rs -> { tables.put(rs.getString("name"), new ArrayList<>()); }, projectId);
+		Map<String, List<ColumnDef>> columns = new LinkedHashMap<>();
+		Map<String, Boolean> builtin = new java.util.HashMap<>();
+		Map<String, Map<RuleOperation, Rule>> rules = new java.util.HashMap<>();
+		jdbc.query("select name, builtin from tsk_platform.table_meta where project_id = ? order by name", rs -> {
+			columns.put(rs.getString("name"), new ArrayList<>());
+			builtin.put(rs.getString("name"), rs.getBoolean("builtin"));
+			rules.put(rs.getString("name"), new java.util.EnumMap<>(RuleOperation.class));
+		}, projectId);
 		jdbc.query("""
 				select t.name as table_name, c.name, c.type, c.nullable, c.is_unique, c.is_system, c.ref_table, c.on_delete
 				from tsk_platform.column_meta c join tsk_platform.table_meta t on t.id = c.table_id
 				where t.project_id = ? order by t.name, c.position""", rs -> {
-			tables.get(rs.getString("table_name"))
+			columns.get(rs.getString("table_name"))
 				.add(new ColumnDef(rs.getString("name"), ColumnType.parse(rs.getString("type")),
 						rs.getBoolean("nullable"), rs.getBoolean("is_unique"), rs.getBoolean("is_system"),
 						rs.getString("ref_table"),
 						rs.getString("on_delete") == null ? null : OnDelete.parse(rs.getString("on_delete"))));
 		}, projectId);
-		List<TableDef> defs = tables.entrySet().stream().map(e -> new TableDef(e.getKey(), e.getValue())).toList();
+		jdbc.query("""
+				select t.name as table_name, r.operation, r.kind, r.owner_column
+				from tsk_platform.rule r join tsk_platform.table_meta t on t.id = r.table_id
+				where t.project_id = ?""", rs -> {
+			rules.get(rs.getString("table_name"))
+				.put(RuleOperation.parse(rs.getString("operation")),
+						new Rule(RuleKind.parse(rs.getString("kind")), rs.getString("owner_column")));
+		}, projectId);
+		List<TableDef> defs = columns.entrySet()
+			.stream()
+			.map(e -> new TableDef(e.getKey(), e.getValue(), rules.get(e.getKey()), builtin.get(e.getKey())))
+			.toList();
 		return new Catalog(version, defs);
 	}
 
@@ -56,12 +72,16 @@ class CatalogRepository {
 	 * few tables), so we replace it whole rather than patching rows: there is
 	 * then no way for the stored catalog to drift from what the planner computed.
 	 */
-	void replace(UUID projectId, Catalog catalog) {
+	public void replace(UUID projectId, Catalog catalog) {
 		jdbc.update("delete from tsk_platform.table_meta where project_id = ?", projectId);
 		for (TableDef table : catalog.tables()) {
 			UUID tableId = jdbc.queryForObject(
-					"insert into tsk_platform.table_meta (project_id, name) values (?, ?) returning id", UUID.class,
-					projectId, table.name());
+					"insert into tsk_platform.table_meta (project_id, name, builtin) values (?, ?, ?) returning id",
+					UUID.class, projectId, table.name(), table.builtin());
+			table.rules()
+				.forEach((operation, rule) -> jdbc.update(
+						"insert into tsk_platform.rule (table_id, operation, kind, owner_column) values (?, ?, ?, ?)",
+						tableId, operation.sql(), rule.kind().json(), rule.ownerColumn()));
 			int position = 0;
 			for (ColumnDef column : table.columns()) {
 				jdbc.update("""
