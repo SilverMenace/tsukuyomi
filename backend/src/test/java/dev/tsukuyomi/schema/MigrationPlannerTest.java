@@ -37,7 +37,7 @@ class MigrationPlannerTest {
 
 		assertThat(plan.statements()).hasSize(5);
 		assertThat(plan.statements().get(0)).startsWith("create table \"p_0123456789ab\".\"notes\"")
-			.contains("\"id\" uuid primary key default gen_random_uuid()")
+			.contains("\"id\" uuid primary key default uuidv7()")
 			.contains("\"title\" text not null")
 			.contains("\"slug\" text constraint \"notes_slug_key\" unique");
 		assertThat(plan.statements().get(1)).endsWith("enable row level security");
@@ -108,6 +108,72 @@ class MigrationPlannerTest {
 				List.of(new CreateTable("wide", List.of(column("c1", ColumnType.TEXT), column("c2", ColumnType.TEXT),
 						column("c3", ColumnType.TEXT), column("c4", ColumnType.TEXT))))))
 			.hasMessageContaining("at most 5 columns");
+	}
+
+	@Test
+	void referenceColumnGetsForeignKeyAndIndex() {
+		var plan = planner.plan(project, Catalog.empty(),
+				List.of(new CreateTable("authors", List.of()), new CreateTable("posts",
+						List.of(new ColumnSpec("author_id", ColumnType.UUID, null, null, "authors", OnDelete.CASCADE)))));
+
+		assertThat(plan.sql()).contains("\"author_id\" uuid constraint \"posts_author_id_fkey\" references"
+				+ " \"p_0123456789ab\".\"authors\" (\"id\") on delete cascade")
+			.contains("create index \"posts_author_id_idx\" on \"p_0123456789ab\".\"posts\" (\"author_id\")");
+		ColumnDef column = plan.result().table("posts").orElseThrow().column("author_id").orElseThrow();
+		assertThat(column.references()).isEqualTo("authors");
+		assertThat(column.onDelete()).isEqualTo(OnDelete.CASCADE);
+
+		// default action, and a self-reference added after the table exists
+		var more = planner.plan(project, plan.result(), List.of(
+				new AddColumn("posts", new ColumnSpec("parent_id", ColumnType.UUID, null, null, "posts", null))));
+		assertThat(more.sql()).contains("on delete restrict").contains("create index \"posts_parent_id_idx\"");
+	}
+
+	@Test
+	void rejectsInvalidReferences() {
+		Catalog authors = planner.plan(project, Catalog.empty(), List.of(new CreateTable("authors", List.of()))).result();
+
+		assertThatThrownBy(() -> planner.plan(project, authors, List.of(new CreateTable("posts",
+				List.of(new ColumnSpec("author_id", ColumnType.TEXT, null, null, "authors", null))))))
+			.hasMessageContaining("must be of type uuid");
+		assertThatThrownBy(() -> planner.plan(project, authors, List.of(new CreateTable("posts",
+				List.of(new ColumnSpec("author_id", ColumnType.UUID, null, null, "nope", null))))))
+			.hasMessageContaining("no table named 'nope'");
+		assertThatThrownBy(() -> planner.plan(project, authors, List.of(new CreateTable("posts",
+				List.of(new ColumnSpec("author_id", ColumnType.UUID, null, null, "x\"; drop table authors; --", null))))))
+			.isInstanceOf(ApiException.class);
+		assertThatThrownBy(() -> planner.plan(project, authors, List.of(new CreateTable("posts",
+				List.of(new ColumnSpec("parent_id", ColumnType.UUID, null, null, "posts", null))))))
+			.hasMessageContaining("cannot reference itself while it is being created");
+		assertThatThrownBy(() -> planner.plan(project, authors, List.of(new CreateTable("posts",
+				List.of(new ColumnSpec("author_id", ColumnType.UUID, false, null, "authors", OnDelete.SET_NULL))))))
+			.hasMessageContaining("needs the column to be nullable");
+		assertThatThrownBy(() -> planner.plan(project, authors, List.of(new CreateTable("posts",
+				List.of(new ColumnSpec("title", ColumnType.TEXT, null, null, null, OnDelete.CASCADE))))))
+			.hasMessageContaining("only applies");
+	}
+
+	@Test
+	void referencedTableCannotBeDroppedFirst() {
+		Catalog both = planner.plan(project, Catalog.empty(), List.of(new CreateTable("authors", List.of()),
+				new CreateTable("posts", List.of(new ColumnSpec("author_id", ColumnType.UUID, null, null, "authors", null)))))
+			.result();
+
+		assertThatThrownBy(() -> planner.plan(project, both, List.of(new DropTable("authors"))))
+			.hasMessageContaining("posts.author_id");
+		// removing the pointing column first makes it possible, in the same migration
+		assertThat(planner.plan(project, both, List.of(new DropColumn("posts", "author_id"), new DropTable("authors")))
+			.result()
+			.tables()).extracting(TableDef::name).containsExactly("posts");
+	}
+
+	@Test
+	void columnNamesUsedAsQueryParametersAreReserved() {
+		for (String name : List.of("select", "order", "limit", "offset")) {
+			assertThatThrownBy(() -> planner.plan(project, Catalog.empty(),
+					List.of(new CreateTable("t", List.of(column(name, ColumnType.TEXT))))))
+				.hasMessageContaining("reserved");
+		}
 	}
 
 	@Test

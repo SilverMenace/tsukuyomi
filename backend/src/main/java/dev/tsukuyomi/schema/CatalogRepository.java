@@ -38,12 +38,14 @@ class CatalogRepository {
 		jdbc.query("select name from tsk_platform.table_meta where project_id = ? order by name",
 				rs -> { tables.put(rs.getString("name"), new ArrayList<>()); }, projectId);
 		jdbc.query("""
-				select t.name as table_name, c.name, c.type, c.nullable, c.is_unique, c.is_system
+				select t.name as table_name, c.name, c.type, c.nullable, c.is_unique, c.is_system, c.ref_table, c.on_delete
 				from tsk_platform.column_meta c join tsk_platform.table_meta t on t.id = c.table_id
 				where t.project_id = ? order by t.name, c.position""", rs -> {
 			tables.get(rs.getString("table_name"))
 				.add(new ColumnDef(rs.getString("name"), ColumnType.parse(rs.getString("type")),
-						rs.getBoolean("nullable"), rs.getBoolean("is_unique"), rs.getBoolean("is_system")));
+						rs.getBoolean("nullable"), rs.getBoolean("is_unique"), rs.getBoolean("is_system"),
+						rs.getString("ref_table"),
+						rs.getString("on_delete") == null ? null : OnDelete.parse(rs.getString("on_delete"))));
 		}, projectId);
 		List<TableDef> defs = tables.entrySet().stream().map(e -> new TableDef(e.getKey(), e.getValue())).toList();
 		return new Catalog(version, defs);
@@ -63,9 +65,11 @@ class CatalogRepository {
 			int position = 0;
 			for (ColumnDef column : table.columns()) {
 				jdbc.update("""
-						insert into tsk_platform.column_meta (table_id, name, type, nullable, is_unique, is_system, position)
-						values (?, ?, ?, ?, ?, ?, ?)""", tableId, column.name(), column.type().sql(), column.nullable(),
-						column.unique(), column.system(), position++);
+						insert into tsk_platform.column_meta
+						  (table_id, name, type, nullable, is_unique, is_system, position, ref_table, on_delete)
+						values (?, ?, ?, ?, ?, ?, ?, ?, ?)""", tableId, column.name(), column.type().sql(), column.nullable(),
+						column.unique(), column.system(), position++, column.references(),
+						column.onDelete() == null ? null : column.onDelete().json());
 			}
 		}
 		jdbc.update("update tsk_platform.project set schema_version = ? where id = ?", catalog.version(), projectId);

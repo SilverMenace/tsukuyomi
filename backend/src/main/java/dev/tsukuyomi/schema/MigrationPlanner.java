@@ -76,15 +76,22 @@ public final class MigrationPlanner {
 		}
 		List<ColumnDef> columns = new ArrayList<>(SYSTEM_COLUMNS);
 		for (ColumnSpec spec : op.columns() == null ? List.<ColumnSpec>of() : op.columns()) {
-			columns.add(newColumn(op.table(), columns, spec));
+			columns.add(newColumn(catalog, op.table(), columns, spec));
 		}
 
 		String table = qualified(project, op.table());
 		List<String> definitions = new ArrayList<>();
-		definitions.add("  \"id\" uuid primary key default gen_random_uuid()");
+		// uuidv7 (PostgreSQL 18+) puts a timestamp in the first bits, so ids sort in
+		// creation order. That keeps "order by created_at, id" equal to insertion
+		// order even for rows inserted in one statement, and keeps the primary-key
+		// index compact because new ids always land at its end.
+		definitions.add("  \"id\" uuid primary key default uuidv7()");
 		definitions.add("  \"created_at\" timestamptz not null default now()");
-		columns.stream().filter(c -> !c.system()).forEach(c -> definitions.add("  " + columnSql(op.table(), c)));
+		columns.stream()
+			.filter(c -> !c.system())
+			.forEach(c -> definitions.add("  " + columnSql(project, op.table(), c)));
 		out.add("create table " + table + " (\n" + String.join(",\n", definitions) + "\n)");
+		columns.stream().filter(ColumnDef::isReference).forEach(c -> out.add(indexSql(project, op.table(), c)));
 
 		// Row-level security on, and forced so that it applies even to the table's
 		// owner. With no policies this means: nobody can see or change any row.
@@ -104,6 +111,14 @@ public final class MigrationPlanner {
 
 	private Catalog dropTable(ProjectRef project, Catalog catalog, DropTable op, List<String> out) {
 		TableDef table = existingTable(catalog, op.table());
+		for (TableDef other : catalog.tables()) {
+			for (ColumnDef column : other.columns()) {
+				if (!other.name().equals(table.name()) && table.name().equals(column.references())) {
+					throw ApiException.conflict("table_referenced", "column '" + other.name() + "." + column.name()
+							+ "' points at '" + table.name() + "'; remove that column first");
+				}
+			}
+		}
 		out.add("drop table " + qualified(project, table.name()));
 		return catalog.withoutTable(table.name());
 	}
@@ -113,8 +128,12 @@ public final class MigrationPlanner {
 		if (op.column() == null) {
 			throw ApiException.badRequest("invalid_operation", "add_column needs a column");
 		}
-		ColumnDef column = newColumn(table.name(), table.columns(), op.column());
-		out.add("alter table " + qualified(project, table.name()) + " add column " + columnSql(table.name(), column));
+		ColumnDef column = newColumn(catalog, table.name(), table.columns(), op.column());
+		out.add("alter table " + qualified(project, table.name()) + " add column "
+				+ columnSql(project, table.name(), column));
+		if (column.isReference()) {
+			out.add(indexSql(project, table.name(), column));
+		}
 		List<ColumnDef> columns = new ArrayList<>(table.columns());
 		columns.add(column);
 		return catalog.withTable(new TableDef(table.name(), columns));
@@ -134,7 +153,7 @@ public final class MigrationPlanner {
 		return catalog.withTable(new TableDef(table.name(), columns));
 	}
 
-	private ColumnDef newColumn(String table, List<ColumnDef> existing, ColumnSpec spec) {
+	private ColumnDef newColumn(Catalog catalog, String table, List<ColumnDef> existing, ColumnSpec spec) {
 		if (spec == null || spec.type() == null) {
 			throw ApiException.badRequest("invalid_column", "every column needs a name and a type");
 		}
@@ -149,6 +168,26 @@ public final class MigrationPlanner {
 		if (spec.type() == ColumnType.JSONB && Boolean.TRUE.equals(spec.unique())) {
 			throw ApiException.badRequest("invalid_column", "a jsonb column cannot be unique");
 		}
+		if (spec.references() != null) {
+			// A reference always points at the target's id, which is a uuid.
+			if (spec.type() != ColumnType.UUID) {
+				throw ApiException.badRequest("invalid_column", "a column that references a table must be of type uuid");
+			}
+			boolean self = spec.references().equals(table);
+			if (!self && catalog.table(spec.references()).isEmpty()) {
+				throw ApiException.badRequest("unknown_table", "no table named '" + spec.references() + "' to reference");
+			}
+			if (self && catalog.table(table).isEmpty()) {
+				throw ApiException.badRequest("invalid_column",
+						"a table cannot reference itself while it is being created; add the column afterwards");
+			}
+			if (spec.onDelete() == OnDelete.SET_NULL && Boolean.FALSE.equals(spec.nullable())) {
+				throw ApiException.badRequest("invalid_column", "set_null needs the column to be nullable");
+			}
+		}
+		else if (spec.onDelete() != null) {
+			throw ApiException.badRequest("invalid_column", "onDelete only applies to a column with references");
+		}
 		return spec.toDef();
 	}
 
@@ -157,7 +196,7 @@ public final class MigrationPlanner {
 			.orElseThrow(() -> ApiException.badRequest("unknown_table", "no table named '" + name + "'"));
 	}
 
-	private static String columnSql(String table, ColumnDef column) {
+	private static String columnSql(ProjectRef project, String table, ColumnDef column) {
 		StringBuilder sql = new StringBuilder(quote(column.name())).append(' ').append(column.type().sql());
 		if (!column.nullable()) {
 			sql.append(" not null");
@@ -166,7 +205,25 @@ public final class MigrationPlanner {
 			// Named explicitly so a later migration can drop it by name.
 			sql.append(" constraint ").append(quote(table + "_" + column.name() + "_key")).append(" unique");
 		}
+		if (column.isReference()) {
+			sql.append(" constraint ")
+				.append(quote(table + "_" + column.name() + "_fkey"))
+				.append(" references ")
+				.append(qualified(project, column.references()))
+				.append(" (\"id\") on delete ")
+				.append(column.onDelete().sql());
+		}
 		return sql.toString();
+	}
+
+	/**
+	 * Postgres indexes the referenced side (the primary key) but not the
+	 * referencing column. Expanding "all comments of this post" filters on that
+	 * column, so without an index every expansion would scan the whole table.
+	 */
+	private static String indexSql(ProjectRef project, String table, ColumnDef column) {
+		return "create index " + quote(table + "_" + column.name() + "_idx") + " on " + qualified(project, table)
+				+ " (" + quote(column.name()) + ")";
 	}
 
 	private static String qualified(ProjectRef project, String table) {

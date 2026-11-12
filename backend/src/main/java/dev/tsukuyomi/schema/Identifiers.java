@@ -25,6 +25,9 @@ public final class Identifiers {
 	/** Columns every table gets automatically. */
 	public static final Set<String> SYSTEM_COLUMNS = Set.of("id", "created_at");
 
+	/** Words the data API uses as query parameters; a column with such a name could not be filtered on. */
+	private static final Set<String> RESERVED_COLUMNS = Set.of("select", "order", "limit", "offset");
+
 	/** Table names we keep for built-in features. */
 	private static final Set<String> RESERVED_TABLES = Set.of("users");
 
@@ -46,6 +49,9 @@ public final class Identifiers {
 		requireValid(name, "column");
 		if (SYSTEM_COLUMNS.contains(name)) {
 			throw ApiException.badRequest("reserved_name", "column '" + name + "' exists on every table already");
+		}
+		if (RESERVED_COLUMNS.contains(name)) {
+			throw ApiException.badRequest("reserved_name", "column name '" + name + "' is reserved by the API");
 		}
 	}
 

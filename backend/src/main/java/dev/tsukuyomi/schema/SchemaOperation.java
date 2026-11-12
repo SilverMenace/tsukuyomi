@@ -22,11 +22,22 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo;
 		@JsonSubTypes.Type(value = SchemaOperation.DropColumn.class, name = "drop_column") })
 public sealed interface SchemaOperation {
 
-	/** A column as described in a request. Missing flags mean "nullable, not unique". */
-	record ColumnSpec(String name, ColumnType type, Boolean nullable, Boolean unique) {
+	/**
+	 * A column as described in a request. Missing flags mean "nullable, not
+	 * unique". "references" names another table of the project and turns the
+	 * column into a foreign key to that table's id.
+	 */
+	record ColumnSpec(String name, ColumnType type, Boolean nullable, Boolean unique, String references,
+			OnDelete onDelete) {
+
+		public ColumnSpec(String name, ColumnType type, Boolean nullable, Boolean unique) {
+			this(name, type, nullable, unique, null, null);
+		}
 
 		ColumnDef toDef() {
-			return new ColumnDef(name, type, nullable == null || nullable, unique != null && unique, false);
+			boolean isNullable = nullable == null || nullable;
+			OnDelete action = references == null ? null : (onDelete == null ? OnDelete.RESTRICT : onDelete);
+			return new ColumnDef(name, type, isNullable, unique != null && unique, false, references, action);
 		}
 
 	}
